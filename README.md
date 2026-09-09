@@ -27,6 +27,7 @@ src/android_runner/
   runner.py        the loop
   verification.py  the independent checker
   device.py        ADB
+  overlay.py       draws the action's target on the screenshot
   config.py cli.py
 ```
 
@@ -81,6 +82,31 @@ model-run --instruction "Explore Settings" --max-actions 20
 Without `--success`, an actor termination is recorded as
 `actor_claimed_success`, `verified` remains false, and the command exits `1`.
 This prevents an exploratory model claim from being mistaken for a QA pass.
+
+## Reading a step
+
+Each turn prints what the model said, then what it actually did:
+
+```text
+[11] Long press the MP3 in the chat thread to open the context menu.
+     expect: A context menu appears with an Edit option.
+     -> long_press 500,812 of 1000 [bottom-center], px 540,1968, 1000ms no-change
+```
+
+The sentence is the model's *claim* about its target. Everything after `->` is
+what was executed: the point on the model's relative 0-1000 grid, the ninth of
+the screen it falls in, the device pixel it mapped to, and whether the screen
+changed. The region is computed from the coordinate, not asked of the model, so
+it cannot agree with a narration the tap contradicts - "tap the send button"
+over `[bottom-left]` is a grounding failure you can see without opening a file.
+
+`no-change` says the action did nothing, but not why. `turn_NNN.marked.png`
+does, because it draws the target on the screen the model was choosing from.
+Two turns of the run above both read `no-change` for opposite reasons: one
+marker sits precisely on the blue play button, over a screen reading
+"Compressing. Please wait.." - correct target, wrong moment - while turn 11's
+sits on the audio waveform, a scrubber that swallows a long press, instead of
+the message body that owns the context menu.
 
 ## Serving on Ollama
 
@@ -156,6 +182,7 @@ Each run writes to `runs/<UTC timestamp>/` unless `--out` is supplied:
 ```text
 entry.png
 turn_000.png
+turn_000.marked.png
 turn_000.raw.txt
 turn_000.json
 turn_000.after.png
@@ -163,6 +190,11 @@ run.json
 ```
 
 Verification replies are stored under `checks` in `run.json`.
+
+`turn_NNN.marked.png` is `turn_NNN.png` with the action's target drawn on it: a
+crosshair for a tap or long press, an arrow for a swipe or drag. Actions with no
+place on the screen - `type`, `wait`, `system_button`, `terminate` - write no
+marked copy rather than a duplicate of the screenshot.
 
 ## Tests
 

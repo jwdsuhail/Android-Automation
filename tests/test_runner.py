@@ -252,6 +252,37 @@ def test_turn_records_carry_transport_diagnostics(tmp_path: Path) -> None:
     assert "thinking" in record
 
 
+def test_a_placed_action_leaves_a_marked_screenshot(tmp_path: Path) -> None:
+    """The marker goes on the screen the model chose from, so turn_NNN.png and
+    turn_NNN.marked.png must be the same shot with and without it."""
+    run(
+        "do something",
+        success=None,
+        device=FakeDevice(),
+        client=FakeClient(
+            [
+                # FakeDevice reports 100x200 for a 20x20 png, so the grid point
+                # is chosen to land inside the image the marker is drawn on.
+                reply({"action": "click", "coordinate": [100, 50]}),
+                reply({"action": "terminate", "status": "success"}),
+            ]
+        ),
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(),
+        sleep=lambda _: None,
+    )
+    marked = tmp_path / "turn_000.marked.png"
+    assert json.loads((tmp_path / "turn_000.json").read_text())["marked"] == marked.name
+    with Image.open(marked) as drawn, Image.open(tmp_path / "turn_000.png") as plain:
+        assert drawn.size == plain.size
+        assert drawn.convert("RGB").tobytes() != plain.convert("RGB").tobytes()
+
+    # terminate names no place, so marking it would only duplicate the shot.
+    assert not (tmp_path / "turn_001.marked.png").exists()
+    assert "marked" not in json.loads((tmp_path / "turn_001.json").read_text())
+
+
 def test_a_truncated_reply_says_so(tmp_path: Path) -> None:
     result = run(
         "do something",

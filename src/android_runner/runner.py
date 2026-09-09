@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from android_runner import qwen_vl
+from android_runner import overlay, qwen_vl
 from android_runner.client import Completion, truncation_note
 from android_runner.config import Settings
 from android_runner.signals import action_key, detect_stuck, screen_change
@@ -175,6 +175,19 @@ def run(
                 "pixels": pixels,
             }
         )
+
+        # Marked on the screen the model was looking at, not the one after the
+        # action, so the picture shows what it aimed at rather than where that
+        # left the app.
+        try:
+            marked = overlay.mark(current_png, pixels)
+        except Exception as exc:  # noqa: BLE001 - a diagnostic must not end a run
+            record["marked_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            if marked is not None:
+                marked_path = out_dir / f"turn_{index:03d}.marked.png"
+                marked_path.write_bytes(marked)
+                record["marked"] = marked_path.name
 
         if parsed.action == "terminate":
             record["actor_status"] = str(parsed.arguments.get("status", "success"))

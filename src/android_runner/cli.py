@@ -11,6 +11,7 @@ from pathlib import Path
 from android_runner.client import ModelClient
 from android_runner.config import Settings, load_env_file
 from android_runner.device import AdbDevice
+from android_runner.qwen_vl import COORD_SCALE
 from android_runner.runner import Budget, run
 
 
@@ -20,13 +21,42 @@ def _point(value: object) -> str | None:
     return None
 
 
+_ROWS = ("top", "mid", "bottom")
+_COLUMNS = ("left", "center", "right")
+
+
+def _third(value: float, names: tuple[str, str, str]) -> str:
+    return names[min(2, max(0, int(value * 3 // COORD_SCALE)))]
+
+
+def _region(value: object) -> str | None:
+    """Name the ninth of the screen a grid point falls in.
+
+    Derived from the coordinate rather than asked of the model, so it cannot
+    disagree with where the tap actually goes. That is the whole point: read
+    against the narration it tells you whether the model hit what it named.
+    "Tap the send button" over `bottom-left` is a grounding failure that
+    otherwise only shows up as a screenshot nobody opened.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        x, y = float(value[0]), float(value[1])
+    except (TypeError, ValueError):
+        return None
+    row, column = _third(y, _ROWS), _third(x, _COLUMNS)
+    return "center" if (row, column) == ("mid", "center") else f"{row}-{column}"
+
+
 def _target(turn: dict[str, object]) -> str:
     """The part of the reply the narration leaves out: what it aimed at.
 
     The sentence says "the plus button"; only the coordinate says *where* the
     model thought that was. Grid and pixels are both shown because a tap that
     lands wrong is either a misread screen (grid) or a bad mapping (pixels),
-    and the pair tells them apart without opening turn_NNN.json.
+    and the pair tells them apart without opening turn_NNN.json. The bracketed
+    region restates the grid point in words, because "782,61" only reads as
+    the top right corner once you have done the arithmetic.
     """
     grid = turn.get("arguments")
     pixels = turn.get("pixels")
@@ -49,7 +79,10 @@ def _target(turn: dict[str, object]) -> str:
             continue
         second = _point(grid.get(end))
         span = first if second is None else f"{first} -> {second}"
-        detail = f" {span} of 1000, px {_point(pixels.get(start))}"
+        where = _region(grid.get(start))
+        if second is not None:
+            where = f"{where} -> {_region(grid.get(end))}"
+        detail = f" {span} of 1000 [{where}], px {_point(pixels.get(start))}"
         if second is not None:
             detail += f" -> {_point(pixels.get(end))}"
         if action == "long_press":
