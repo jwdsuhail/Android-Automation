@@ -1,0 +1,34 @@
+"""Configuration refusals that must stay loud."""
+
+from __future__ import annotations
+
+import pytest
+
+from android_runner.config import Settings
+
+
+def test_reflection_requires_two_history_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
+    monkeypatch.setenv("MODEL_HISTORY_N", "1")
+    monkeypatch.setenv("MODEL_REFLECTION", "1")
+    with pytest.raises(ValueError, match="at least 2"):
+        Settings.from_env()
+
+
+def test_reflection_can_be_disabled_with_history_n_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
+    monkeypatch.setenv("MODEL_HISTORY_N", "1")
+    monkeypatch.setenv("MODEL_REFLECTION", "0")
+    settings = Settings.from_env()
+    assert settings.model_reflection is False
+    assert settings.model_history_n == 1
+
+
+def test_reflection_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
+    monkeypatch.setenv("MODEL_HISTORY_N", "3")
+    monkeypatch.delenv("MODEL_REFLECTION", raising=False)
+    monkeypatch.delenv("MODEL_THINKING", raising=False)
+    settings = Settings.from_env()
+    assert settings.model_reflection is True
+    assert settings.model_thinking is False
