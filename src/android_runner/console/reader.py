@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,7 @@ from android_runner.runner import error_class
 # Every artifact `runner.run()` can write, and nothing else. The file endpoint
 # matches against this rather than joining user input onto a path.
 ARTIFACT = re.compile(
-    r"^(?:entry\.png|run\.json"
+    r"^(?:entry\.png|run\.json|case\.json|console\.log"
     r"|turn_\d{3}(?:\.marked|\.after)?\.png"
     r"|turn_\d{3}\.raw\.txt"
     r"|turn_\d{3}\.json"
@@ -53,6 +54,10 @@ class RunSummary:
     outcome: str
     instruction: str
     success: str | None
+    # From the `case.json` snapshot the run was started with, absent for a run
+    # typed straight into the terminal.
+    case_id: str | None
+    case_name: str | None
     actions: int
     waits: int
     elapsed_s: float | None
@@ -133,15 +138,29 @@ def _decorate(turn: dict[str, Any]) -> dict[str, Any]:
     return turn
 
 
+def _case(run_dir: Path) -> dict[str, Any]:
+    """The `case.json` snapshot, or an empty mapping.
+
+    Written before the first turn by whoever started the run, so unlike
+    `run.json` it is present from the beginning - which is the only reason a
+    run still in progress can say what it is trying to do.
+    """
+    return _load(run_dir / "case.json") or {}
+
+
 def _reconstructed(run_id: str, run_dir: Path) -> RunSummary:
     """A summary for a run whose `run.json` was never written.
 
     `finish()` is the only writer of the instruction and the success
     condition, so neither survives a crash. Everything else is recoverable
     from the turn records, and saying so is better than hiding the run.
+
+    A run started from a case is the exception: its snapshot carries both, so a
+    crashed or still-running case run is described rather than blank.
     """
     turns = [t for t in (_load(p) for p in _turn_files(run_dir)) if t is not None]
     waits = sum(1 for t in turns if t.get("action") == "wait")
+    case = _case(run_dir)
     return RunSummary(
         id=run_id,
         started_at=_started_at(run_id),
@@ -149,8 +168,10 @@ def _reconstructed(run_id: str, run_dir: Path) -> RunSummary:
         verified=False,
         error_class=None,
         outcome=INCOMPLETE,
-        instruction="",
-        success=None,
+        instruction=str(case.get("instruction", "")),
+        success=case.get("success"),
+        case_id=case.get("id"),
+        case_name=case.get("name"),
         actions=len(turns) - waits,
         waits=waits,
         elapsed_s=None,
@@ -159,10 +180,11 @@ def _reconstructed(run_id: str, run_dir: Path) -> RunSummary:
     )
 
 
-def _summarize(run_id: str, result: dict[str, Any]) -> RunSummary:
+def _summarize(run_id: str, run_dir: Path, result: dict[str, Any]) -> RunSummary:
     status = str(result.get("status", INCOMPLETE))
     verified = bool(result.get("verified"))
     turns = result.get("turns")
+    case = _case(run_dir)
     return RunSummary(
         id=run_id,
         started_at=_started_at(run_id),
@@ -172,6 +194,8 @@ def _summarize(run_id: str, result: dict[str, Any]) -> RunSummary:
         outcome=_outcome(status, verified, complete=True),
         instruction=str(result.get("instruction", "")),
         success=result.get("success"),
+        case_id=case.get("id"),
+        case_name=case.get("name"),
         actions=int(result.get("actions", 0)),
         waits=int(result.get("waits", 0)),
         elapsed_s=result.get("elapsed_s"),
@@ -218,7 +242,7 @@ class RunStore:
 
         result = _load(run_dir / "run.json")
         found = (
-            _summarize(run_id, result)
+            _summarize(run_id, run_dir, result)
             if result is not None
             else _reconstructed(run_id, run_dir)
         )
@@ -261,6 +285,23 @@ class RunStore:
                 p.name for p in run_dir.iterdir() if ARTIFACT.match(p.name)
             ),
         )
+
+    def delete(self, run_id: str) -> bool:
+        """Remove one run directory and everything inside it.
+
+        The id is resolved and checked to be a direct child of the runs
+        directory before anything is unlinked, for the same reason `artifact`
+        checks one: local-only is not a reason to accept `..`. A run is the
+        only thing here with no other copy, so this is the one operation in
+        this module that cannot be undone by re-reading the disk.
+        """
+        root = self.runs_dir.resolve()
+        run_dir = (self.runs_dir / run_id).resolve()
+        if run_dir.parent != root or not run_dir.is_dir():
+            return False
+        shutil.rmtree(run_dir)
+        self._cache.pop(run_id, None)
+        return True
 
     def artifact(self, run_id: str, name: str) -> Path | None:
         """A file inside one run directory, or None.

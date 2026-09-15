@@ -29,6 +29,7 @@ src/android_runner/
   device.py        ADB
   overlay.py       draws the action's target on the screenshot
   format.py        renders a turn record as one line of text
+  cases.py         a saved task: the model-run arguments, named and stored
   config.py cli.py
   console/         optional local web console, see below
 ```
@@ -95,6 +96,37 @@ retried: asking again until the answer changes is best-of-N, not verification.
 `checks[].attempts` and `checks[].errors` in `run.json` record what each verdict
 cost.
 
+### Cold start
+
+Every run force-stops the app under test before it takes the entry screenshot:
+
+```
+adb -s $ADB_DEVICE shell am force-stop com.xuper.chat.app
+```
+
+That package is the default, so no flag or instruction has to ask for it. A run
+that inherits the previous run's half-open dialog is measuring the last test as
+much as this one, and that failure reads as flakiness rather than as leftover
+state.
+
+It is `am force-stop`, not `pm clear`: processes die and the task is dropped,
+storage is untouched, and the account stays signed in. The run records what it
+closed as `closed_app` in `run.json`, and the runner waits `MODEL_STEP_SLEEP`
+afterwards so the entry screenshot catches the launcher rather than the closing
+animation.
+
+Set `APP_PACKAGE` to drive a different app, or to empty to leave the device
+alone:
+
+```bash
+APP_PACKAGE=com.example.other model-run --instruction "..."
+APP_PACKAGE= model-run --instruction "..."
+```
+
+A package that is not installed is not an error. `am force-stop` exits `0`
+whatever name it is given, so a typo here closes nothing and says nothing;
+check the name with `adb shell pm list packages | grep <name>`.
+
 ### Warm-up
 
 The first call to a cold vision server pays for weight load, `torch.compile`
@@ -118,6 +150,47 @@ model-run --instruction "Explore Settings" --max-actions 20
 Without `--success`, an actor termination is recorded as
 `actor_claimed_success`, `verified` remains false, and the command exits `1`.
 This prevents an exploratory model claim from being mistaken for a QA pass.
+
+## Saved cases
+
+The arguments above are a test case: an instruction, the condition that proves
+it worked, and the budgets that bound the loop. `--case` gives that set a name
+and a file, so the same test can be the same test twice instead of a command
+line retyped out of shell history.
+
+```bash
+model-run --case cases/audio-metadata.json
+model-run --case cases/audio-metadata.json --max-actions 70   # the flag wins
+```
+
+One JSON file per case in `cases/`, which is the source of truth - no index and
+no database, for the same reason `runs/` has neither:
+
+```json
+{
+  "id": "audio-metadata",
+  "name": "Audio metadata",
+  "instruction": "Open the Test 14 chat and update the audio metadata",
+  "success": "the audio message is labelled Verified Track with the artist Harness",
+  "max_actions": 70,
+  "max_waits": 20,
+  "wall_clock_s": 2400,
+  "verify_timeout_s": null,
+  "warmup": true
+}
+```
+
+Any flag given explicitly overrides the file. The one exception is
+`--no-warmup`, which can only turn warm-up off and never back on, so a case
+that stored `"warmup": false` stays off without it. `--instruction` is required
+only when `--case` is absent.
+
+`runs/` is ignored by git and `cases/` is not: a case is an input worth reading
+in a diff, a run is output.
+
+Cases are also written and started from the console below. Both paths validate
+through `Case.validate()` in `cases.py`, so a case the browser rejects is
+rejected at the terminal for the same reason and in the same words.
 
 ## Reading a step
 
@@ -281,6 +354,12 @@ turn_000.after.png
 run.json
 ```
 
+Two more appear conditionally. `case.json` is written before the first turn
+when the run came from `--case`: the case exactly as it was when run, so
+editing it afterwards does not rewrite history. `console.log` holds the
+runner's stdout and stderr when the console started it, which is where to look
+when a run dies before writing any turn at all.
+
 Verification replies are stored under `checks` in `run.json`. A `long_press`
 turn also carries a `hold` block naming the duration executed, who decided
 it, and every adjustment made on the way - see [Hold time](#hold-time).
@@ -292,8 +371,7 @@ marked copy rather than a duplicate of the screenshot.
 
 ## Console
 
-A local web console for reading runs. It is read-only: it shows what is in
-`runs/`, and it never starts, stops or changes anything.
+A local web console for reading runs and for writing and running cases.
 
 ```bash
 pip install -e ".[console]"
@@ -302,8 +380,20 @@ npm --prefix console run build
 model-console                 # http://127.0.0.1:8765
 ```
 
-`--runs-dir` points it at a different directory, `--port` moves it. It binds
-`127.0.0.1` and has no authentication, which is the whole of its threat model.
+It is not read-only. It reads `runs/`, it reads and writes `cases/`, it can
+spawn one `model-run` at a time as a subprocess, and it can delete a run
+directory. It never edits a run - the only change it will make to one is to
+remove it whole - and there is no stop button, so a run started here is stopped
+the way any other process is.
+
+It binds `127.0.0.1` and has no authentication, which remains the whole of its
+threat model. Anything that can reach the port can edit a case, start a run on
+your emulator, and delete results. `--no-run` omits both endpoints that write
+to `runs/` - starting and deleting - which leaves that directory read-only;
+cases stay editable. `--runs-dir`, `--cases-dir` (default `cases/`) and
+`--port` move the rest.
+
+### Runs
 
 Three columns: every run on the left, the chosen run's turns in the middle,
 the chosen turn's screenshot and numbers on the right. The selected run and
@@ -328,6 +418,36 @@ The last row matters more than it looks. `run.json` is written only when a run
 reaches the end, so a crashed or interrupted run leaves nothing but its turns -
 and those are often the runs worth reading. The console rebuilds them rather
 than hiding the directory.
+
+The outcome dropdown filters the list; the count beside each outcome is of the
+whole directory, not of what is on screen. **Select** turns the list into
+checkboxes and offers a delete, which removes the run directories outright -
+screenshots, turn records and all. There is no trash: `runs/` is ignored by
+git, so a deleted run has no other copy anywhere. A run that is still being
+written is refused by name rather than deleted out from under the process
+writing it.
+
+### Cases
+
+The Cases tab lists what is in `cases/` and edits it. Saving writes the JSON
+file described in [Saved cases](#saved-cases) and nothing else; deleting
+removes that file. A file that will not parse is listed with its error rather
+than skipped, on the same principle as an unfinished run. A case keeps its id
+when you rename it, so the runs that recorded it still point at something.
+
+**Run** starts `model-run --case` as a subprocess and streams the run as it
+happens: turns append with their screenshots, and two meters show the action
+and wall-clock budgets being spent, which are the numbers that decide whether
+the run dies. A second Run while one is in flight is refused rather than
+queued - one emulator cannot run two tests at once without each acting on the
+other's screen - and the refusal names the run already going so you can go and
+watch it.
+
+Nothing parses the runner's output. The stream re-reads the run directory, for
+the same reason the Unfinished outcome exists: a run in progress is just an
+unfinished run. Two things follow. A run started at the terminal streams into
+the browser as well as one started here, and reloading mid-run reattaches from
+the directory instead of losing it.
 
 Below 1024px the screenshot column is not shown; this is a desktop tool.
 

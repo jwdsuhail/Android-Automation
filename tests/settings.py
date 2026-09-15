@@ -23,4 +23,7 @@ SETTINGS = Settings(
     adb_timeout_s=10,
     step_sleep_s=0,
     long_press_ms=1000,
+    # The real default, so the runner tests exercise the close that every
+    # run actually performs rather than a disabled version of it.
+    app_package="com.xuper.chat.app",
 )

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
+from android_runner.console.launcher import Launch, Launcher
 from android_runner.console.server import create_app
 from test_console_reader import CLICK, WAIT, complete_run, write_turns
 
@@ -96,3 +98,55 @@ def test_an_unknown_api_path_is_a_404_and_not_the_app_shell(tmp_path: Path) -> N
     response = client(tmp_path).get("/api/nope")
     assert response.status_code == 404
     assert "html" not in response.headers["content-type"]
+
+
+# --- deleting a run -------------------------------------------------------
+
+
+def test_deleting_a_run_removes_the_directory_and_the_listing_entry(
+    tmp_path: Path,
+) -> None:
+    complete_run(tmp_path, "20260914T121427Z")
+    complete_run(tmp_path, "20260908T164612Z")
+    api = client(tmp_path)
+
+    assert api.delete("/api/runs/20260908T164612Z").status_code == 204
+    assert not (tmp_path / "20260908T164612Z").exists()
+    assert [r["id"] for r in api.get("/api/runs").json()] == ["20260914T121427Z"]
+
+
+def test_deleting_an_unknown_run_is_a_clean_404(tmp_path: Path) -> None:
+    response = client(tmp_path).delete("/api/runs/20991231T000000Z")
+    assert response.status_code == 404
+    assert "20991231T000000Z" in response.json()["detail"]
+
+
+def test_a_run_still_writing_is_refused_rather_than_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing the directory would break the process still writing into it."""
+    complete_run(tmp_path, "20260914T121427Z")
+    live = Launch(
+        run_id="20260914T121427Z",
+        case_id="audio-metadata",
+        started_at="2026-09-14T12:14:27Z",
+        pid=4242,
+    )
+    monkeypatch.setattr(Launcher, "active", lambda self: live)
+
+    response = client(tmp_path).delete("/api/runs/20260914T121427Z")
+    assert response.status_code == 409
+    assert "still running" in response.json()["detail"]
+    assert (tmp_path / "20260914T121427Z").is_dir()
+
+
+def test_no_run_leaves_runs_read_only(tmp_path: Path) -> None:
+    """`--no-run` covers both endpoints that write to runs/, not just launching."""
+    complete_run(tmp_path, "20260914T121427Z")
+    api = TestClient(create_app(tmp_path, tmp_path / "cases", allow_run=False))
+
+    # No route is registered, so the app shell answers instead - the point is
+    # that nothing deletes, and the run is still on disk afterwards.
+    assert api.delete("/api/runs/20260914T121427Z").status_code != 204
+    assert (tmp_path / "20260914T121427Z").is_dir()
+    assert api.get("/api/health").json()["can_run"] is False

@@ -33,6 +33,7 @@ class DeviceLike(Protocol):
     def screenshot(self, path: Path) -> tuple[bytes, int, int]: ...
     def execute(self, action: dict[str, Any]) -> None: ...
     def long_press_floor_ms(self) -> int: ...
+    def close_app(self, package: str) -> None: ...
 
 
 class ClientLike(Protocol):
@@ -94,6 +95,7 @@ def run(
     hold_ceiling_ms = hold.ceiling_ms(settings.adb_timeout_s)
     warmup_ms: float | None = None
     warmup_error: str | None = None
+    closed_app: str | None = None
     emit = on_turn or (lambda _turn: None)
     emit_check = on_check or (lambda _check: None)
 
@@ -118,6 +120,8 @@ def run(
             result["warmup_ms"] = warmup_ms
         if warmup_error:
             result["warmup_error"] = warmup_error
+        if closed_app:
+            result["closed_app"] = closed_app
         _write_json(out_dir / "run.json", result)
         return result
 
@@ -159,6 +163,27 @@ def run(
         return (
             "oracle_error" if outcome.kind == INFRASTRUCTURE else "oracle_inconclusive"
         )
+
+    # Every case starts from a cold app. A run that inherits the last run's
+    # half-open dialog is measuring the previous test as much as this one, and
+    # that is the failure that reads as flakiness rather than as leftover
+    # state. Closing happens before the entry screenshot, so what is captured
+    # and what the oracle checks first is the state the agent really starts in.
+    if settings.app_package:
+        try:
+            device.close_app(settings.app_package)
+        except Exception as exc:  # noqa: BLE001 - failures become artifacts
+            return finish(
+                "device_error",
+                f"could not close {settings.app_package}: {type(exc).__name__}: {exc}",
+            )
+        closed_app = settings.app_package
+        # Force-stop drops the app's window, and the launcher takes a moment to
+        # draw. Without this the entry screenshot can catch that animation, and
+        # the first thing the agent is shown is a half-faded app it was told
+        # was closed.
+        if settings.step_sleep_s:
+            sleep(settings.step_sleep_s)
 
     try:
         current_png, width, height = capture("entry.png")

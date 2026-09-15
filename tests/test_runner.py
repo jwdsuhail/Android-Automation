@@ -35,6 +35,7 @@ class FakeDevice:
     def __init__(self) -> None:
         self.changed = False
         self.actions: list[dict[str, Any]] = []
+        self.closed: list[str] = []
 
     def screenshot(self, path: Path) -> tuple[bytes, int, int]:
         data = png(255 if self.changed else 0)
@@ -49,6 +50,9 @@ class FakeDevice:
 
     def long_press_floor_ms(self) -> int:
         return 400  # what the emulator reports on SDK 35
+
+    def close_app(self, package: str) -> None:
+        self.closed.append(package)
 
 
 class FakeClient:
@@ -421,6 +425,9 @@ def test_localized_change_is_moved_with_a_truthful_note(tmp_path: Path) -> None:
         def long_press_floor_ms(self) -> int:
             return 400
 
+        def close_app(self, package: str) -> None:
+            pass
+
     client = RecordingClient(
         [_click(), reply({"action": "terminate", "status": "success"})]
     )
@@ -729,3 +736,101 @@ def test_a_hold_turn_prints_the_resolved_duration_and_its_source(capsys) -> None
     lines = capsys.readouterr().err.splitlines()
     assert lines[0].endswith("px 540,1968, 3000ms from instruction")
     assert lines[1] == "     hold: model asked for 800ms, overridden by the instruction"
+
+
+# --- closing the app under test ---
+
+
+def test_the_app_is_closed_before_the_entry_screenshot(tmp_path: Path) -> None:
+    """Order is the whole point. Closing after the capture would hand the
+    agent a picture of the previous run's screen and call it the start."""
+    order: list[str] = []
+
+    class OrderedDevice(FakeDevice):
+        def close_app(self, package: str) -> None:
+            order.append(f"close {package}")
+            super().close_app(package)
+
+        def screenshot(self, path: Path) -> tuple[bytes, int, int]:
+            order.append(f"screenshot {path.name}")
+            return super().screenshot(path)
+
+    device = OrderedDevice()
+    result = run(
+        "do something",
+        success=None,
+        device=device,
+        client=FakeClient([reply({"action": "terminate", "status": "success"})]),
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(),
+        sleep=lambda _: None,
+    )
+    assert order[:2] == ["close com.xuper.chat.app", "screenshot entry.png"]
+    assert device.closed == ["com.xuper.chat.app"]
+    # Recorded, so a run that started from a state nobody expected can be told
+    # apart from one where the close never happened.
+    assert result["closed_app"] == "com.xuper.chat.app"
+
+
+def test_an_empty_package_leaves_the_device_alone(tmp_path: Path) -> None:
+    """A run against something other than the app under test."""
+    device = FakeDevice()
+    result = run(
+        "do something",
+        success=None,
+        device=device,
+        client=FakeClient([reply({"action": "terminate", "status": "success"})]),
+        settings=replace(SETTINGS, app_package=""),
+        out_dir=tmp_path,
+        budget=Budget(),
+        sleep=lambda _: None,
+    )
+    assert device.closed == []
+    assert "closed_app" not in result
+
+
+def test_a_close_that_fails_is_infrastructure_not_a_failed_task(
+    tmp_path: Path,
+) -> None:
+    """The agent never got a screen. Exiting 1 here would file a dead ADB
+    connection as a task the agent could not do."""
+
+    class DeadDevice(FakeDevice):
+        def close_app(self, package: str) -> None:
+            raise OSError("adb: device offline")
+
+    result = run(
+        "do something",
+        success=None,
+        device=DeadDevice(),
+        client=FakeClient([]),
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(),
+        sleep=lambda _: None,
+    )
+    assert result["status"] == "device_error"
+    assert result["error_class"] == "infrastructure"
+    assert "com.xuper.chat.app" in result["detail"]
+    assert "device offline" in result["detail"]
+    assert not (tmp_path / "entry.png").exists()
+
+
+def test_the_launcher_is_given_time_to_draw_before_the_entry_shot(
+    tmp_path: Path,
+) -> None:
+    """Force-stop returns before the app's window is gone, so a screenshot
+    taken straight after catches the app half-faded."""
+    slept: list[float] = []
+    run(
+        "do something",
+        success=None,
+        device=FakeDevice(),
+        client=FakeClient([reply({"action": "terminate", "status": "success"})]),
+        settings=replace(SETTINGS, step_sleep_s=1.5),
+        out_dir=tmp_path,
+        budget=Budget(),
+        sleep=slept.append,
+    )
+    assert slept[0] == 1.5

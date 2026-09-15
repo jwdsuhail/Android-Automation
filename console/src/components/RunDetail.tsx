@@ -25,7 +25,7 @@ function OracleCheck({ check }: { check: Check }) {
         : "var(--infra)";
 
   return (
-    <div className="rounded-md border border-border bg-panel p-3">
+    <div className="rounded-md bg-hover p-3">
       <div className="flex items-center gap-2">
         <span className="nums text-[11px] font-semibold" style={{ color }}>
           oracle: {verdict}
@@ -58,10 +58,14 @@ function OracleCheck({ check }: { check: Check }) {
 function TurnRow({
   turn,
   active,
+  first,
+  last,
   onSelect,
 }: {
   turn: Turn;
   active: boolean;
+  first: boolean;
+  last: boolean;
   onSelect: () => void;
 }) {
   const row = useRef<HTMLButtonElement>(null);
@@ -80,20 +84,51 @@ function TurnRow({
     turn.moved === undefined ? null : turn.moved ? " moved" : " no-change";
   const body = suffix ? turn.line.slice(0, -suffix.length) : turn.line;
 
+  // The rail is drawn a segment at a time, one per row, because the rows are
+  // adjacent and the segments therefore join into a single line without
+  // anyone having to measure the list. The ends stop at the outermost nodes:
+  // the sequence starts at turn 0 and finishes at the last one.
+  const rail = first && last ? null : first ? "top-[19px] bottom-0" : last ? "top-0 h-[20px]" : "inset-y-0";
+
+  // A filled node moved the screen; a hollow one did not. The colour repeats
+  // what the word at the end of the line already says.
+  const node = turn.error
+    ? "var(--agent)"
+    : active
+      ? "var(--accent)"
+      : turn.moved === false
+        ? "var(--infra)"
+        : "var(--faint)";
+
   return (
     <button
       ref={row}
       onClick={onSelect}
       aria-current={active ? "true" : undefined}
-      className="flex w-full gap-2.5 border-b border-border px-3 py-2 text-left transition-colors duration-150 hover:bg-hover"
-      style={{ background: active ? "var(--accent-soft)" : undefined }}
+      className={`row relative flex w-full gap-3 py-[11px] pl-7 pr-4 text-left transition-colors duration-150 ${
+        active ? "bg-hover" : "hover:bg-hover"
+      }`}
     >
-      <span className="nums w-6 shrink-0 pt-[1px] text-right text-[11px] text-faint">
+      {active && (
+        <span className="absolute inset-y-0 left-0 w-[2px] bg-accent" aria-hidden />
+      )}
+      {rail && (
+        <span className={`absolute left-[15px] w-px bg-border ${rail}`} aria-hidden />
+      )}
+      <span
+        className="absolute left-[12px] top-[16px] size-[7px] rounded-full"
+        style={{
+          background: turn.moved === true ? node : "var(--canvas)",
+          boxShadow: turn.moved === true ? undefined : `inset 0 0 0 1px ${node}`,
+        }}
+        aria-hidden
+      />
+      <span className="nums w-[22px] shrink-0 text-right text-[15px] leading-[1.3] text-faint">
         {turn.index}
       </span>
       <span className="min-w-0 flex-1">
         {turn.narration && (
-          <span className="block text-[12.5px] leading-snug text-text">
+          <span className="block max-w-[72ch] text-[13px] leading-snug font-medium text-text">
             {turn.narration}
           </span>
         )}
@@ -153,7 +188,10 @@ export function RunDetail({
           </span>
         </div>
 
-        <h2 className="mt-2 text-[14px] leading-snug font-medium">
+        {/* A line of prose is read, not scanned: at the full width of this
+            column the instruction runs to about 130 characters, roughly double
+            what an eye tracks comfortably back to the left margin. */}
+        <h2 className="mt-2 max-w-[72ch] text-[14px] leading-snug font-medium text-pretty">
           {run.instruction || (
             <span className="text-faint">
               The instruction was never recorded: run.json is written only when
@@ -162,12 +200,14 @@ export function RunDetail({
           )}
         </h2>
         {run.success && (
-          <p className="mt-1 text-[12px] text-dim">
+          <p className="mt-1 max-w-[72ch] text-[12px] text-dim text-pretty">
             <span className="text-faint">success:</span> {run.success}
           </p>
         )}
         {run.detail && (
-          <p className="mt-1.5 text-[12px] text-dim">{run.detail}</p>
+          <p className="mt-1.5 max-w-[72ch] text-[12px] text-dim text-pretty">
+            {run.detail}
+          </p>
         )}
 
         <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2">
@@ -188,11 +228,13 @@ export function RunDetail({
       </header>
 
       <div className="scroll flex-1">
-        {run.turns.map((turn) => (
+        {run.turns.map((turn, index) => (
           <TurnRow
             key={turn.index}
             turn={turn}
             active={turn.index === selectedTurn}
+            first={index === 0}
+            last={index === run.turns.length - 1}
             onSelect={() => onSelectTurn(turn.index)}
           />
         ))}
@@ -205,7 +247,7 @@ export function RunDetail({
         )}
 
         {run.checks.length > 0 && (
-          <div className="space-y-2 bg-raised p-3">
+          <div className="space-y-2 p-3">
             <h3 className="text-[10px] uppercase tracking-wide text-faint">
               Verification
             </h3>

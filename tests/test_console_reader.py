@@ -196,3 +196,31 @@ def test_a_summary_is_reread_when_the_run_changes(tmp_path: Path) -> None:
     stamp = run_dir.stat().st_mtime + 10
     os.utime(run_dir, (stamp, stamp))
     assert store.summary("20260914T121427Z").outcome == PASS  # type: ignore[union-attr]
+
+
+def test_delete_refuses_an_id_that_climbs_out_of_the_runs_directory(
+    tmp_path: Path,
+) -> None:
+    """Local-only is not a reason to accept `..`, and rmtree is unforgiving."""
+    runs = tmp_path / "runs"
+    complete_run(runs, "20260914T121427Z")
+    outside = tmp_path / "precious"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("still here", encoding="utf-8")
+
+    store = RunStore(runs)
+    assert store.delete("../precious") is False
+    assert store.delete("20260914T121427Z/..") is False
+    assert (outside / "keep.txt").is_file()
+    assert (runs / "20260914T121427Z").is_dir()
+
+
+def test_delete_drops_the_cached_summary_with_the_directory(tmp_path: Path) -> None:
+    """A summary kept after the run is gone would resurrect it in the listing."""
+    complete_run(tmp_path, "20260914T121427Z")
+    store = RunStore(tmp_path)
+    assert store.summary("20260914T121427Z") is not None
+
+    assert store.delete("20260914T121427Z") is True
+    assert store.summary("20260914T121427Z") is None
+    assert store.summaries() == []

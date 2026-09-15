@@ -73,6 +73,21 @@ class AdbDevice:
             return hold.DEFAULT_FLOOR_MS
         return int(value)
 
+    def close_app(self, package: str) -> None:
+        """Force-stop a package so the next run starts from a cold app.
+
+        This kills the processes and drops the task, but leaves storage
+        alone - the account stays signed in. That is the line between this
+        and `pm clear`, which would hand every run a login screen.
+
+        An uninstalled package is not an error here: `am force-stop` exits 0
+        whatever name it is given, so this call cannot be used to check one.
+        A typo in the package name therefore looks like success and leaves
+        the app running, which is why the name is checked against the device
+        rather than trusted.
+        """
+        self._command("shell", "am", "force-stop", package)
+
     def execute(self, action: dict[str, Any]) -> None:
         name = action.get("action")
         if name == "click":

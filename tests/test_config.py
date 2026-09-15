@@ -54,3 +54,21 @@ def test_a_longer_adb_timeout_permits_a_longer_hold(
     monkeypatch.setenv("ADB_TIMEOUT_S", "60")
     monkeypatch.setenv("ADB_LONG_PRESS_MS", "9000")
     assert Settings.from_env().long_press_ms == 9000
+
+
+def test_the_app_under_test_defaults_to_the_chat_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
+    monkeypatch.delenv("APP_PACKAGE", raising=False)
+    assert Settings.from_env().app_package == "com.xuper.chat.app"
+
+
+def test_an_empty_app_package_turns_the_close_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not a missing value. Running against another app is a real case, and
+    it must not be reachable only by editing the source."""
+    monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
+    monkeypatch.setenv("APP_PACKAGE", "  ")
+    assert Settings.from_env().app_package == ""

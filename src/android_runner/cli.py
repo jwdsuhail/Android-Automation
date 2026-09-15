@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from android_runner.cases import Case
 from android_runner.client import ModelClient
 from android_runner.config import Settings, load_env_file
 from android_runner.device import AdbDevice
@@ -93,19 +94,76 @@ def _exit_code(result: dict[str, Any]) -> int:
     return 2 if result.get("error_class") == "infrastructure" else 1
 
 
+def _resolve_case(args: argparse.Namespace) -> Case:
+    """The case this invocation runs, from a file, flags, or both.
+
+    A flag given on the command line always beats the stored case, so a saved
+    case can be re-run with one budget raised without editing the file. The
+    result is validated as a `Case` whether or not a file was involved, so the
+    terminal and the console enforce one rule.
+    """
+    stored: Case | None = None
+    if args.case is not None:
+        payload = json.loads(Path(args.case).read_text(encoding="utf-8"))
+        stored = Case.from_dict(payload)
+
+    if args.instruction is None and stored is None:
+        raise ValueError("one of --instruction or --case is required")
+
+    def pick(flag: object, saved: object, fallback: object) -> object:
+        if flag is not None:
+            return flag
+        return saved if stored is not None else fallback
+
+    case = Case(
+        id=stored.id if stored else "ad-hoc",
+        name=stored.name if stored else "ad-hoc",
+        instruction=args.instruction or (stored.instruction if stored else ""),
+        success=args.success if args.success is not None else (stored.success if stored else None),
+        max_actions=int(pick(args.max_actions, stored.max_actions if stored else None, 20)),
+        max_waits=int(pick(args.max_waits, stored.max_waits if stored else None, 12)),
+        wall_clock_s=float(pick(args.wall_clock_s, stored.wall_clock_s if stored else None, 240.0)),
+        verify_timeout_s=(
+            args.verify_timeout_s
+            if args.verify_timeout_s is not None
+            else (stored.verify_timeout_s if stored else None)
+        ),
+        # `--no-warmup` can only ever turn warm-up off, never back on, so a case
+        # that stored `warmup: false` stays off without the flag.
+        warmup=(stored.warmup if stored else True) and not args.no_warmup,
+        # Carried so the snapshot in the run directory says which version of
+        # the case was run. Empty for an ad-hoc invocation, which is the truth:
+        # that case was never saved.
+        created_at=stored.created_at if stored else "",
+        updated_at=stored.updated_at if stored else "",
+    )
+    case.validate()
+    return case
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run one bounded Android GUI agent with optional verification."
     )
-    parser.add_argument("--instruction", required=True)
+    parser.add_argument(
+        "--case",
+        type=Path,
+        default=None,
+        help="A stored case file. Supplies every argument below; any flag given "
+        "explicitly still wins.",
+    )
+    parser.add_argument("--instruction", default=None)
     parser.add_argument(
         "--success",
         default=None,
         help="Visible condition required for a verified pass. Omit for exploration.",
     )
-    parser.add_argument("--max-actions", type=int, default=20)
-    parser.add_argument("--max-waits", type=int, default=12)
-    parser.add_argument("--wall-clock-s", type=float, default=240)
+    # Every budget defaults to None rather than to its value, so that "not
+    # given" can be told from "given the same as the default". A case can only
+    # supply what the command line did not.
+    parser.add_argument("--max-actions", type=int, default=None)
+    parser.add_argument("--max-waits", type=int, default=None)
+    parser.add_argument("--wall-clock-s", type=float, default=None)
     parser.add_argument(
         "--verify-timeout-s",
         type=float,
@@ -124,12 +182,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-env-file", action="store_true")
     args = parser.parse_args(argv)
 
-    if args.max_actions < 1 or args.max_waits < 1:
-        parser.error("--max-actions and --max-waits must be at least 1")
-    if args.wall_clock_s <= 0:
-        parser.error("--wall-clock-s must be greater than 0")
-    if args.verify_timeout_s is not None and args.verify_timeout_s <= 0:
-        parser.error("--verify-timeout-s must be greater than 0")
+    try:
+        case = _resolve_case(args)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
     if not args.no_env_file:
         loaded = load_env_file(args.env_file)
@@ -142,21 +198,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
 
+    if settings.app_package:
+        print(f"closing {settings.app_package} before the run", flush=True)
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = args.out or Path("runs") / stamp
+
+    # The case as it was when run, written before the first turn so that a run
+    # in progress already says what it is running. Later edits to the stored
+    # case must not rewrite the history of what this run actually executed.
+    if args.case is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "case.json").write_text(
+            json.dumps(case.as_dict(), indent=2) + "\n", encoding="utf-8"
+        )
+
     result = run(
-        args.instruction,
-        success=args.success,
+        case.instruction,
+        success=case.success,
         device=AdbDevice(settings),
         client=ModelClient(settings),
         settings=settings,
         out_dir=out_dir,
         budget=Budget(
-            max_actions=args.max_actions,
-            max_waits=args.max_waits,
-            wall_clock_s=args.wall_clock_s,
-            verify_timeout_s=args.verify_timeout_s,
-            warmup=not args.no_warmup,
+            max_actions=case.max_actions,
+            max_waits=case.max_waits,
+            wall_clock_s=case.wall_clock_s,
+            verify_timeout_s=case.verify_timeout_s,
+            warmup=case.warmup,
         ),
         on_turn=_print_turn,
         on_check=_print_check,

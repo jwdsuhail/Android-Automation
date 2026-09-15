@@ -4,9 +4,11 @@ import { fileUrl } from "../api";
 
 type View = "before" | "marked" | "after";
 
+/* No rule under the row: the values start at one x instead, and a column edge
+   tracks the eye across a 372px panel as well as a hairline did. */
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-baseline justify-between gap-2 border-b border-border py-1">
+    <div className="grid grid-cols-[92px_minmax(0,1fr)] items-baseline gap-3 py-[5px]">
       <span className="text-[11px] text-faint">{label}</span>
       <span className="nums text-[11.5px] text-text">{value}</span>
     </div>
@@ -42,10 +44,12 @@ export function TurnDetail({
 
   return (
     <aside className="scroll h-full border-l border-border bg-panel">
-      <header className="flex items-center justify-between border-b border-border px-3 py-2">
+      {/* This aside is its own scroll container, so the header has to be told
+          to stay; the other two columns sit outside their scroll areas. */}
+      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-panel px-3 py-2">
         <h3 className="nums text-[12px] font-semibold">Turn {turn.index}</h3>
         {available.length > 1 && (
-          <div className="flex gap-0.5 rounded-sm border border-border p-0.5">
+          <div className="flex gap-0.5">
             {available.map((option) => (
               <button
                 key={option}
@@ -53,7 +57,7 @@ export function TurnDetail({
                 aria-pressed={view === option}
                 className="inline-flex min-h-6 items-center rounded-xs px-2 text-[11px] capitalize transition-colors duration-150"
                 style={{
-                  background: view === option ? "var(--raised)" : "transparent",
+                  background: view === option ? "var(--hover)" : "transparent",
                   color: view === option ? "var(--text)" : "var(--dim)",
                 }}
               >
@@ -69,12 +73,13 @@ export function TurnDetail({
           href={fileUrl(runId, name)}
           target="_blank"
           rel="noreferrer"
-          className="block bg-raised p-2"
+          className="block"
         >
+          {/* The screen is the evidence. A frame around it is decoration. */}
           <img
             src={fileUrl(runId, name)}
             alt={`Turn ${turn.index}, ${view}`}
-            className="mx-auto max-h-[46vh] w-auto rounded-sm border border-border"
+            className="mx-auto max-h-[46vh] w-auto"
             loading="lazy"
           />
         </a>
@@ -121,7 +126,7 @@ export function TurnDetail({
         )}
 
         {turn.hold && (
-          <div className="mt-3 rounded-md border border-border bg-raised p-3">
+          <div className="mt-3 rounded-md bg-hover p-3">
             <p className="nums text-[11.5px] text-text">
               held {turn.hold.ms} ms
               {turn.hold.source && turn.hold.source !== "model"
@@ -138,10 +143,9 @@ export function TurnDetail({
 
         {turn.error && (
           <p
-            className="nums mt-3 rounded-md border p-3 text-[11.5px]"
+            className="nums mt-3 rounded-md p-3 text-[11.5px]"
             style={{
               color: "var(--agent)",
-              borderColor: "color-mix(in srgb, var(--agent) 35%, transparent)",
               background: "color-mix(in srgb, var(--agent) 8%, transparent)",
             }}
           >
@@ -153,7 +157,7 @@ export function TurnDetail({
           <summary className="cursor-pointer py-1.5 text-[11px] text-faint">
             Turn record
           </summary>
-          <pre className="nums mt-2 overflow-x-auto rounded-sm border border-border bg-raised p-2 text-[10.5px] leading-relaxed text-dim">
+          <pre className="nums mt-2 overflow-x-auto rounded-sm bg-hover p-2 text-[10.5px] leading-relaxed text-dim">
             {JSON.stringify(turn, null, 2)}
           </pre>
         </details>
