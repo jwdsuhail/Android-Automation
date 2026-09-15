@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/format.ts","./src/main.tsx","./src/useurlstate.ts","./src/components/rundetail.tsx","./src/components/runlist.tsx","./src/components/statusbadge.tsx","./src/components/turndetail.tsx"],"version":"5.9.3"}

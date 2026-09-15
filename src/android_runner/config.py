@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from android_runner import hold
+
 
 def load_env_file(path: Path | None = None) -> list[str]:
     """Load unset variables from a simple KEY=VALUE file."""
@@ -89,9 +91,19 @@ class Settings:
                 "MODEL_REASONING_EFFORT must be auto, none, low, medium, or high"
             )
 
+        # `input swipe` blocks the ADB call for the whole hold, so the longest
+        # usable hold is a consequence of ADB_TIMEOUT_S rather than a third
+        # number to keep in sync with it. No lower bound beyond zero: a hold
+        # under the device's own long-press threshold is raised by hold.resolve,
+        # which says so in the turn record instead of doing it silently.
+        adb_timeout_s = _positive_float("ADB_TIMEOUT_S", "30")
+        ceiling_ms = hold.ceiling_ms(adb_timeout_s)
         long_press_ms = int(os.environ.get("ADB_LONG_PRESS_MS", "1000"))
-        if not 200 <= long_press_ms <= 5000:
-            raise ValueError("ADB_LONG_PRESS_MS must be between 200 and 5000")
+        if not 0 < long_press_ms <= ceiling_ms:
+            raise ValueError(
+                f"ADB_LONG_PRESS_MS must be between 1 and {ceiling_ms}, the most "
+                f"that fits inside ADB_TIMEOUT_S of {adb_timeout_s}s"
+            )
 
         return cls(
             model_base_url=os.environ.get(
@@ -110,7 +122,7 @@ class Settings:
             model_max_tokens=int(os.environ.get("MODEL_MAX_TOKENS", "2048")),
             adb_path=os.environ.get("ADB_PATH", "adb"),
             adb_device=device,
-            adb_timeout_s=_positive_float("ADB_TIMEOUT_S", "30"),
+            adb_timeout_s=adb_timeout_s,
             step_sleep_s=max(0.0, float(os.environ.get("MODEL_STEP_SLEEP", "1"))),
             long_press_ms=long_press_ms,
         )

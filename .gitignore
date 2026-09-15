@@ -7,3 +7,8 @@ runs/
 dist/
 build/
 *.egg-info/
+
+# Console: npm deps and the frontend build, which is produced by
+# `npm --prefix console run build` rather than committed.
+console/node_modules/
+src/android_runner/console/static/

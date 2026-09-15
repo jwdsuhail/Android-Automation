@@ -28,7 +28,9 @@ src/android_runner/
   verification.py  the independent checker
   device.py        ADB
   overlay.py       draws the action's target on the screenshot
+  format.py        renders a turn record as one line of text
   config.py cli.py
+  console/         optional local web console, see below
 ```
 
 `qwen_vl.py` is named for the model on purpose. A second model means a second
@@ -49,6 +51,10 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
+Add `console` to the extras if you want the web console: `pip install -e
+".[dev,console]"`. The runner itself never imports it, so the core install
+stays `openai` and `pillow`.
+
 Edit `.env`, then confirm the device:
 
 ```bash
@@ -66,8 +72,38 @@ model-run \
   --wall-clock-s 2400
 ```
 
-Exit code `0` means the independent checker verified `--success`. Every other
-outcome exits `1`; configuration refusal exits `2`.
+### Exit codes
+
+| Code | Meaning | Statuses |
+|------|---------|----------|
+| `0` | The independent checker verified `--success`. | `verified` |
+| `1` | The run measured the agent and it did not get there. | `parse_error`, `stuck`, `budget_exhausted`, `timed_out`, `actor_gave_up`, `actor_claimed_success` |
+| `2` | Nothing was measured. The result says nothing about the agent. | `device_error`, `model_error`, `oracle_error`, `oracle_inconclusive`, configuration refusal |
+
+`run.json` carries the same split as `error_class`: `"agent"`, `"infrastructure"`,
+or `null` for a pass. A timed-out oracle is not a failed task, and reporting it
+as one makes every red result unreadable.
+
+The two infrastructure statuses that concern the checker are distinct on
+purpose. `oracle_error` means no verdict arrived - the transport failed, and
+the fix is your server. `oracle_inconclusive` means a reply arrived and was
+unusable, most often the same answer to the success condition and its negation,
+and the fix is the judge.
+
+The oracle is retried only when the transport fails. A verdict is never
+retried: asking again until the answer changes is best-of-N, not verification.
+`checks[].attempts` and `checks[].errors` in `run.json` record what each verdict
+cost.
+
+### Warm-up
+
+The first call to a cold vision server pays for weight load, `torch.compile`
+and CUDA graph capture - measured at 13s here against a 5.8s median. `model-run`
+spends one throwaway call on that before the run starts, so no measured turn
+absorbs it, and records the cost as `warmup_ms`. Pass `--no-warmup` to skip it.
+
+`--verify-timeout-s` defaults to `MODEL_TIMEOUT_S`, the same ceiling the actor
+gets.
 
 The success condition must describe something visible on the final screen.
 Split historical or multi-stage requirements into separate runs. A single
@@ -107,6 +143,62 @@ marker sits precisely on the blue play button, over a screen reading
 "Compressing. Please wait.." - correct target, wrong moment - while turn 11's
 sits on the audio waveform, a scrubber that swallows a long press, instead of
 the message body that owns the context menu.
+
+## Hold time
+
+Write the duration into the instruction and it is the duration the device
+holds for:
+
+```bash
+model-run --instruction 'Long press the MP3 in the "Test 14" chat for 3 seconds'
+```
+
+`for 3 seconds`, `for 800ms` and `for 2.5s` all read. The verb nearest the
+duration decides who it belongs to, so `wait for 10 seconds then long press the
+MP3` is a ten second wait and leaves the hold alone. Two *different* stated
+hold times cannot both be enforced from one instruction, so neither is: the
+model chooses per turn and the run record says why.
+
+When the instruction names no time, the model's `duration_ms` stands, falling
+back to `ADB_LONG_PRESS_MS` (default 1000).
+
+Two bounds are applied, and both announce themselves:
+
+- **Floor** - the device's own `long_press_timeout`, read once per run with
+  `settings get secure long_press_timeout` (400ms on an SDK 35 emulator, 500ms
+  assumed when the device will not say). Below it Android delivers a tap, so a
+  shorter request is raised rather than quietly turned into a click.
+- **Ceiling** - `ADB_TIMEOUT_S` less a two second margin, 28000ms by default.
+  `adb shell input swipe` blocks for the whole hold, so a longer one would kill
+  its own call. Raising `ADB_TIMEOUT_S` raises this with it.
+
+Every adjustment lands in `turn_NNN.json` and on the terminal:
+
+```text
+     -> long_press 500,812 of 1000 [bottom-center], px 540,1968, 3000ms from instruction
+     hold: instruction asked for 3s
+     hold: model asked for 800ms, overridden by the instruction
+```
+
+```json
+"hold": {
+  "ms": 3000,
+  "source": "instruction",
+  "requested_ms": 3000,
+  "model_ms": 800,
+  "notes": ["instruction asked for 3s",
+            "model asked for 800ms, overridden by the instruction"]
+}
+```
+
+Qwen's own `mobile_use` schema spells this parameter `time`, in **seconds**,
+shared with `wait`; this prompt asks for `duration_ms`, in **milliseconds**, on
+`long_press` alone. So `duration_ms: 3` meaning three seconds is the mistake
+the model is primed to make, and unrepaired it is a 3ms hold - a tap, while
+every artifact still reads `3`. Such a value is read as seconds and the repair
+is recorded, so the mistakes can be counted. A `duration_ms` that is not a
+positive number ends the run as `parse_error`, the agent's fault, rather than
+surfacing from inside ADB as a dead device.
 
 ## Serving on Ollama
 
@@ -189,12 +281,58 @@ turn_000.after.png
 run.json
 ```
 
-Verification replies are stored under `checks` in `run.json`.
+Verification replies are stored under `checks` in `run.json`. A `long_press`
+turn also carries a `hold` block naming the duration executed, who decided
+it, and every adjustment made on the way - see [Hold time](#hold-time).
 
 `turn_NNN.marked.png` is `turn_NNN.png` with the action's target drawn on it: a
 crosshair for a tap or long press, an arrow for a swipe or drag. Actions with no
 place on the screen - `type`, `wait`, `system_button`, `terminate` - write no
 marked copy rather than a duplicate of the screenshot.
+
+## Console
+
+A local web console for reading runs. It is read-only: it shows what is in
+`runs/`, and it never starts, stops or changes anything.
+
+```bash
+pip install -e ".[console]"
+npm --prefix console install
+npm --prefix console run build
+model-console                 # http://127.0.0.1:8765
+```
+
+`--runs-dir` points it at a different directory, `--port` moves it. It binds
+`127.0.0.1` and has no authentication, which is the whole of its threat model.
+
+Three columns: every run on the left, the chosen run's turns in the middle,
+the chosen turn's screenshot and numbers on the right. The selected run and
+turn live in the URL, so `/runs/20260914T121427Z?turn=11` is a link you can
+send to someone rather than a place you have to describe.
+
+The action line - `click 228,640 of 1000 [mid-left], px 246,1551 moved` - is
+rendered by `format.py` on the server and sent as a string, so the browser and
+the terminal cannot drift apart. See [Reading a step](#reading-a-step).
+
+Runs are sorted into four outcomes, each with a glyph and a word as well as a
+colour:
+
+| Outcome | Means |
+|---|---|
+| Verified | the oracle confirmed the success condition |
+| Not reached | the agent did not get there: `error_class` is `agent` |
+| Infrastructure | something broke, including `oracle_inconclusive` |
+| Unfinished | no `run.json`, reconstructed from the `turn_*.json` files |
+
+The last row matters more than it looks. `run.json` is written only when a run
+reaches the end, so a crashed or interrupted run leaves nothing but its turns -
+and those are often the runs worth reading. The console rebuilds them rather
+than hiding the directory.
+
+Below 1024px the screenshot column is not shown; this is a desktop tool.
+
+For development, `npm --prefix console run dev` serves on :5173 with hot
+reload and proxies `/api` to :8765, so `model-console` has to be running too.
 
 ## Tests
 
@@ -213,4 +351,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-No parent-repository path or package is referenced.
+No parent-repository path or package is referenced. The console's
+`node_modules` and its build output are not copied by git; rebuild them with
+`npm --prefix console install && npm --prefix console run build` if you want
+it, or leave them out entirely.

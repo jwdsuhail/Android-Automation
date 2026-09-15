@@ -13,10 +13,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+console = ["fastapi>=0.110.0", "uvicorn[standard]>=0.27.0"]
+dev = ["pytest>=8.0.0", "httpx>=0.27.0"]
 
 [project.scripts]
 model-run = "android_runner.cli:main"
+model-console = "android_runner.console.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

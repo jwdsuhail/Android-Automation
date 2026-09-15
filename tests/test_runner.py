@@ -11,7 +11,7 @@ from PIL import Image
 from android_runner.client import Completion
 from android_runner.cli import _print_turn
 from android_runner.qwen_vl import parse, to_pixels
-from android_runner.runner import Budget, run
+from android_runner.runner import Budget, error_class, run
 from settings import SETTINGS
 
 
@@ -47,6 +47,9 @@ class FakeDevice:
         if action["action"] != "wait":
             self.changed = True
 
+    def long_press_floor_ms(self) -> int:
+        return 400  # what the emulator reports on SDK 35
+
 
 class FakeClient:
     def __init__(
@@ -54,18 +57,34 @@ class FakeClient:
         actor_replies: list[str],
         oracle_holds: Callable[[], bool] = lambda: False,
         finish_reason: str = "stop",
+        negate: bool = True,
+        oracle_error: str | None = None,
     ) -> None:
         self.actor_replies = iter(actor_replies)
         self.oracle_holds = oracle_holds
         self.finish_reason = finish_reason
+        # False makes the judge answer the predicate and its negation the same
+        # way, which is the degenerate verdict the runner must not read as "no".
+        self.negate = negate
+        self.oracle_error = oracle_error
+        self.oracle_timeouts: list[float | None] = []
+        self.warmups = 0
 
     def complete(
         self, messages: list[dict[str, Any]], *, timeout_s: float | None = None
     ) -> Completion:
+        # warmup_messages carries the image alone, with no instruction ahead of
+        # it, so it is the only call with a single message.
+        if len(messages) < 2:
+            self.warmups += 1
+            return Completion("ready", 1)
         instruction = str(messages[1]["content"][0]["text"])
         if instruction.startswith("Look only at"):
+            self.oracle_timeouts.append(timeout_s)
+            if self.oracle_error:
+                return Completion("", 1, error=self.oracle_error)
             holds = self.oracle_holds()
-            if "NOT the case" in instruction:
+            if self.negate and "NOT the case" in instruction:
                 holds = not holds
             return Completion(
                 reply({"action": "terminate", "status": "success" if holds else "fail"}),
@@ -399,6 +418,9 @@ def test_localized_change_is_moved_with_a_truthful_note(tmp_path: Path) -> None:
             self.actions.append(action)
             self.changed = True
 
+        def long_press_floor_ms(self) -> int:
+            return 400
+
     client = RecordingClient(
         [_click(), reply({"action": "terminate", "status": "success"})]
     )
@@ -453,3 +475,257 @@ def test_console_prints_check_and_expect(capsys: Any) -> None:
     assert "check: the sheet opened" in err
     assert "expect: the file list is visible" in err
     assert "[1] tap Documents" in err
+
+
+TIMEOUT = "APITimeoutError: Request timed out."
+
+
+def _verifying_run(tmp_path: Path, client: FakeClient, budget: Budget) -> Any:
+    return run(
+        "do something",
+        success="the result is visible",
+        device=FakeDevice(),
+        client=client,
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=budget,
+        sleep=lambda _: None,
+    )
+
+
+def test_the_oracle_is_not_on_a_shorter_leash_than_the_actor(tmp_path: Path) -> None:
+    """It used to get a hard-coded 8s while the actor got MODEL_TIMEOUT_S, so a
+    slow first call read as a failed task."""
+    client = FakeClient([], oracle_holds=lambda: True)
+    _verifying_run(tmp_path, client, Budget())
+    assert client.oracle_timeouts
+    assert all(value == SETTINGS.model_timeout_s for value in client.oracle_timeouts)
+
+
+def test_an_explicit_verify_timeout_still_wins(tmp_path: Path) -> None:
+    client = FakeClient([], oracle_holds=lambda: True)
+    _verifying_run(tmp_path, client, Budget(verify_timeout_s=3))
+    assert all(value == 3 for value in client.oracle_timeouts)
+
+
+def test_an_unreachable_oracle_is_infrastructure_not_a_failed_task(
+    tmp_path: Path,
+) -> None:
+    client = FakeClient(
+        [reply({"action": "terminate", "status": "success"})], oracle_error=TIMEOUT
+    )
+    result = _verifying_run(tmp_path, client, Budget())
+    assert result["status"] == "oracle_error"
+    assert result["error_class"] == "infrastructure"
+    assert result["verified"] is False
+    assert result["checks"][-1]["errors"] == [TIMEOUT, TIMEOUT]
+
+
+def test_a_degenerate_judge_is_inconclusive_not_an_oracle_error(
+    tmp_path: Path,
+) -> None:
+    """Same answer to the predicate and its negation is the judge failing, not
+    the transport. Both carry no signal, but they have different fixes."""
+    client = FakeClient(
+        [reply({"action": "terminate", "status": "success"})],
+        oracle_holds=lambda: True,
+        negate=False,
+    )
+    result = _verifying_run(tmp_path, client, Budget())
+    assert result["status"] == "oracle_inconclusive"
+    assert result["error_class"] == "infrastructure"
+    assert result["checks"][-1]["kind"] == "inconclusive"
+    assert result["checks"][-1]["condition"] == "success"
+    assert result["checks"][-1]["negation"] == "success"
+
+
+def test_error_class_separates_a_dead_harness_from_a_failed_task() -> None:
+    assert error_class("verified") is None
+    for status in (
+        "device_error",
+        "model_error",
+        "oracle_error",
+        "oracle_inconclusive",
+    ):
+        assert error_class(status) == "infrastructure"
+    for status in (
+        "parse_error",
+        "stuck",
+        "budget_exhausted",
+        "timed_out",
+        "actor_gave_up",
+        "actor_claimed_success",
+    ):
+        assert error_class(status) == "agent"
+
+
+def test_warmup_is_one_extra_call_recorded_in_the_run(tmp_path: Path) -> None:
+    client = FakeClient([reply({"action": "terminate", "status": "success"})])
+    result = run(
+        "do something",
+        success=None,
+        device=FakeDevice(),
+        client=client,
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(warmup=True),
+        sleep=lambda _: None,
+    )
+    assert client.warmups == 1
+    assert result["status"] == "actor_claimed_success"
+    assert "warmup_ms" in result
+    assert "warmup_error" not in result
+
+
+def test_warmup_is_off_unless_asked_for(tmp_path: Path) -> None:
+    client = FakeClient([reply({"action": "terminate", "status": "success"})])
+    result = run(
+        "do something",
+        success=None,
+        device=FakeDevice(),
+        client=client,
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(),
+        sleep=lambda _: None,
+    )
+    assert client.warmups == 0
+    assert "warmup_ms" not in result
+
+
+def test_a_failed_warmup_does_not_end_the_run(tmp_path: Path) -> None:
+    class ExplodingWarmup(FakeClient):
+        def complete(
+            self, messages: list[dict[str, Any]], *, timeout_s: float | None = None
+        ) -> Completion:
+            if len(messages) < 2:
+                raise RuntimeError("connection refused")
+            return super().complete(messages, timeout_s=timeout_s)
+
+    result = run(
+        "do something",
+        success=None,
+        device=FakeDevice(),
+        client=ExplodingWarmup([reply({"action": "terminate", "status": "success"})]),
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(warmup=True),
+        sleep=lambda _: None,
+    )
+    assert result["status"] == "actor_claimed_success"
+    assert "connection refused" in result["warmup_error"]
+
+
+def _long_press(**extra: Any) -> str:
+    return reply({"action": "long_press", "coordinate": [500, 812], **extra})
+
+
+def _run_one_hold(tmp_path: Path, instruction: str, reply_text: str) -> tuple[FakeDevice, dict[str, Any]]:
+    device = FakeDevice()
+    result = run(
+        instruction,
+        success=None,
+        device=device,
+        client=FakeClient(
+            [reply_text, reply({"action": "terminate", "status": "success"})]
+        ),
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(max_actions=2),
+        sleep=lambda _: None,
+    )
+    return device, result
+
+
+def test_the_instruction_decides_the_hold_the_device_performs(tmp_path: Path) -> None:
+    """The point of the whole feature: the number that reaches ADB is the one
+    written in the instruction, not the one the model guessed."""
+    device, _ = _run_one_hold(
+        tmp_path,
+        'long press the "Test 14" audio for 3 seconds',
+        _long_press(duration_ms=800),
+    )
+    assert device.actions[0]["duration_ms"] == 3000
+
+
+def test_the_hold_record_reaches_the_turn_artifact(tmp_path: Path) -> None:
+    _run_one_hold(
+        tmp_path,
+        "long press the audio for 3 seconds",
+        _long_press(duration_ms=800),
+    )
+    held = json.loads((tmp_path / "turn_000.json").read_text())["hold"]
+    assert held["ms"] == 3000
+    assert held["source"] == "instruction"
+    assert held["model_ms"] == 800
+    assert held["notes"] == [
+        "instruction asked for 3s",
+        "model asked for 800ms, overridden by the instruction",
+    ]
+
+
+def test_the_model_still_decides_when_the_instruction_states_no_time(tmp_path: Path) -> None:
+    device, _ = _run_one_hold(
+        tmp_path, "long press the audio", _long_press(duration_ms=800)
+    )
+    assert device.actions[0]["duration_ms"] == 800
+    assert json.loads((tmp_path / "turn_000.json").read_text())["hold"]["source"] == "model"
+
+
+def test_seconds_in_the_millisecond_key_are_repaired_before_the_device_sees_them(
+    tmp_path: Path,
+) -> None:
+    """Unrepaired this is a 3ms hold, which Android delivers as a tap while
+    every artifact still reads 3."""
+    device, _ = _run_one_hold(tmp_path, "long press the audio", _long_press(duration_ms=3))
+    assert device.actions[0]["duration_ms"] == 3000
+    notes = json.loads((tmp_path / "turn_000.json").read_text())["hold"]["notes"]
+    assert "repaired to 3000ms" in notes[0]
+
+
+def test_a_hold_under_the_device_threshold_is_raised_not_delivered_as_a_tap(
+    tmp_path: Path,
+) -> None:
+    device, _ = _run_one_hold(
+        tmp_path, "long press the audio", _long_press(duration_ms=250)
+    )
+    assert device.actions[0]["duration_ms"] == 400
+    assert "delivered as a tap" in json.loads(
+        (tmp_path / "turn_000.json").read_text()
+    )["hold"]["notes"][0]
+
+
+def test_the_configured_default_applies_when_nobody_names_a_time(tmp_path: Path) -> None:
+    device, _ = _run_one_hold(tmp_path, "long press the audio", _long_press())
+    assert device.actions[0]["duration_ms"] == SETTINGS.long_press_ms
+    assert json.loads((tmp_path / "turn_000.json").read_text())["hold"]["source"] == "default"
+
+
+def test_a_duration_that_is_not_a_number_is_the_agents_fault(tmp_path: Path) -> None:
+    """It reaches ADB as a crash inside device.execute otherwise, where the
+    bare except files a model typo as a dead device and exits 2."""
+    device, result = _run_one_hold(
+        tmp_path, "long press the audio", _long_press(duration_ms="1s")
+    )
+    assert result["status"] == "parse_error"
+    assert result["error_class"] == "agent"
+    assert device.actions == []
+
+
+def test_a_hold_turn_prints_the_resolved_duration_and_its_source(capsys) -> None:
+    _print_turn(
+        {
+            "index": 0,
+            "action": "long_press",
+            "arguments": {"action": "long_press", "coordinate": [500, 812], "duration_ms": 800},
+            "pixels": {"action": "long_press", "coordinate": [540, 1968], "duration_ms": 3000},
+            "hold": {
+                "ms": 3000,
+                "source": "instruction",
+                "notes": ["model asked for 800ms, overridden by the instruction"],
+            },
+        }
+    )
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0].endswith("px 540,1968, 3000ms from instruction")
+    assert lines[1] == "     hold: model asked for 800ms, overridden by the instruction"

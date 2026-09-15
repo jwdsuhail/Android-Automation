@@ -9,6 +9,7 @@ from typing import Any
 
 from PIL import Image
 
+from android_runner import hold
 from android_runner.config import Settings
 
 SYSTEM_KEYS = {"back": 4, "home": 3, "menu": 82, "enter": 66}
@@ -50,6 +51,28 @@ class AdbDevice:
             width, height = image.size
         return png, width, height
 
+    def long_press_floor_ms(self) -> int:
+        """The shortest hold this device counts as a long press.
+
+        ViewConfiguration reads this setting, so a hold below it is delivered
+        as a plain tap however long the caller asked for - which is exactly
+        how a unit mistake hides. One cheap shell call, not uiautomator.
+
+        Some builds leave the setting unset or answer "null". That is not
+        worth ending a run over, so Android's own default stands in; a dead
+        device will surface a sentence later on the entry screenshot anyway.
+        """
+        try:
+            raw = self._command(
+                "shell", "settings", "get", "secure", "long_press_timeout"
+            )
+        except (subprocess.SubprocessError, OSError):
+            return hold.DEFAULT_FLOOR_MS
+        value = raw.stdout.decode("utf-8", errors="replace").strip()
+        if not value.isdigit() or int(value) <= 0:
+            return hold.DEFAULT_FLOOR_MS
+        return int(value)
+
     def execute(self, action: dict[str, Any]) -> None:
         name = action.get("action")
         if name == "click":
@@ -57,13 +80,11 @@ class AdbDevice:
             self._command("shell", "input", "tap", str(x), str(y))
         elif name == "long_press":
             x, y = action["coordinate"]
-            duration = max(
-                200,
-                min(
-                    5000,
-                    int(action.get("duration_ms", self.settings.long_press_ms)),
-                ),
-            )
+            # Not clamped here. How long a hold lasts is policy, decided by
+            # hold.resolve before this is called and written into the turn
+            # record; a second clamp at this depth is what silently turned a
+            # three second hold into a 200ms tap and told nobody.
+            duration = int(action.get("duration_ms", self.settings.long_press_ms))
             self._command(
                 "shell",
                 "input",

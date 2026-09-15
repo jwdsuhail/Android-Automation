@@ -8,16 +8,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from android_runner import overlay, qwen_vl
+from android_runner import hold, overlay, qwen_vl
 from android_runner.client import Completion, truncation_note
 from android_runner.config import Settings
 from android_runner.signals import action_key, detect_stuck, screen_change
-from android_runner.verification import Check, verify
+from android_runner.verification import INFRASTRUCTURE, Check, verify
+
+# A run either measures the agent or it does not. A dead device, a dead server
+# and a judge that never answered say nothing about whether the task was done,
+# so the caller has to be able to tell them from a task the agent failed.
+_INFRASTRUCTURE_STATUSES = frozenset(
+    {"device_error", "model_error", "oracle_error", "oracle_inconclusive"}
+)
+
+
+def error_class(status: str) -> str | None:
+    """"infrastructure", "agent", or None for a verified pass."""
+    if status == "verified":
+        return None
+    return "infrastructure" if status in _INFRASTRUCTURE_STATUSES else "agent"
 
 
 class DeviceLike(Protocol):
     def screenshot(self, path: Path) -> tuple[bytes, int, int]: ...
     def execute(self, action: dict[str, Any]) -> None: ...
+    def long_press_floor_ms(self) -> int: ...
 
 
 class ClientLike(Protocol):
@@ -31,7 +46,15 @@ class Budget:
     max_actions: int = 20
     max_waits: int = 12
     wall_clock_s: float = 240.0
-    verify_timeout_s: float = 8.0
+    # None gives the oracle the same ceiling as the actor. Starving the grader
+    # is what made a slow server indistinguishable from a failed task.
+    verify_timeout_s: float | None = None
+    # Spent on a failed transport only, never on a verdict.
+    verify_attempts: int = 2
+    # One throwaway call before the run, so the first real call is not the one
+    # paying for weight load and CUDA graph capture. Off by default to keep the
+    # library loop a pure function of its replies; the CLI turns it on.
+    warmup: bool = False
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -48,6 +71,7 @@ def run(
     out_dir: Path,
     budget: Budget,
     on_turn: Callable[[dict[str, Any]], None] | None = None,
+    on_check: Callable[[dict[str, Any]], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
@@ -62,15 +86,25 @@ def run(
     actions = 0
     waits = 0
     note: str | None = None
+    # The instruction does not change between turns, so it is read once. The
+    # device's long-press threshold does not either, and asking for it costs
+    # one shell call against thirty turns that would each ask the same thing.
+    instruction_ms, instruction_notes = hold.from_instruction(instruction)
+    hold_floor_ms = device.long_press_floor_ms()
+    hold_ceiling_ms = hold.ceiling_ms(settings.adb_timeout_s)
+    warmup_ms: float | None = None
+    warmup_error: str | None = None
     emit = on_turn or (lambda _turn: None)
+    emit_check = on_check or (lambda _check: None)
 
     def remaining() -> float:
         return max(0.0, deadline - clock())
 
     def finish(status: str, detail: str) -> dict[str, Any]:
-        result = {
+        result: dict[str, Any] = {
             "status": status,
             "verified": status == "verified",
+            "error_class": error_class(status),
             "instruction": instruction,
             "success": success,
             "detail": detail,
@@ -80,6 +114,10 @@ def run(
             "turns": turns,
             "checks": checks,
         }
+        if warmup_ms is not None:
+            result["warmup_ms"] = warmup_ms
+        if warmup_error:
+            result["warmup_error"] = warmup_error
         _write_json(out_dir / "run.json", result)
         return result
 
@@ -91,11 +129,17 @@ def run(
         return png, width, height
 
     def check(png: bytes) -> Check:
-        # The verifier makes two calls. Splitting the remaining run budget keeps
-        # the pair inside the one wall-clock ceiling.
-        per_call = min(budget.verify_timeout_s, remaining() / 2)
+        # The verifier asks two questions and may retry each one. Dividing by
+        # the worst case keeps the whole pair inside the one wall-clock
+        # ceiling; capping it at the actor's own ceiling stops the grader from
+        # being the only component on a short timeout.
+        attempts = max(1, budget.verify_attempts)
+        ceiling = budget.verify_timeout_s or settings.model_timeout_s
+        per_call = min(ceiling, remaining() / (2 * attempts))
         if per_call <= 0:
-            outcome = Check(None, "run wall clock exhausted", "")
+            outcome = Check(
+                None, "run wall clock exhausted", "", kind=INFRASTRUCTURE
+            )
         else:
             outcome = verify(
                 client,  # type: ignore[arg-type] - protocol-compatible test clients
@@ -103,14 +147,39 @@ def run(
                 success or "",
                 settings.model_history_n,
                 per_call,
+                attempts,
             )
-        checks.append(outcome.as_dict())
+        record = outcome.as_dict()
+        checks.append(record)
+        emit_check(record)
         return outcome
+
+    def oracle_status(outcome: Check) -> str:
+        """A judge that never answered is not a judge that said no."""
+        return (
+            "oracle_error" if outcome.kind == INFRASTRUCTURE else "oracle_inconclusive"
+        )
 
     try:
         current_png, width, height = capture("entry.png")
     except Exception as exc:  # noqa: BLE001 - failures become artifacts
         return finish("device_error", f"{type(exc).__name__}: {exc}")
+
+    # Paid once, deliberately, before anything is measured. Without it the
+    # first call of the run absorbs weight load, torch.compile and CUDA graph
+    # capture - which is how the entry check became an unpaid warm-up that
+    # timed out doing the job.
+    if budget.warmup:
+        warmup_started = clock()
+        try:
+            warm = client.complete(
+                qwen_vl.warmup_messages(current_png),
+                timeout_s=min(settings.model_timeout_s, remaining()),
+            )
+            warmup_error = warm.error
+        except Exception as exc:  # noqa: BLE001 - a warm-up must not end a run
+            warmup_error = f"{type(exc).__name__}: {exc}"
+        warmup_ms = round((clock() - warmup_started) * 1000, 2)
 
     if success:
         initial = check(current_png)
@@ -176,6 +245,30 @@ def run(
             }
         )
 
+        if parsed.action == "long_press":
+            # `pixels` is the dict already stored on the record above, so
+            # overwriting the duration here reaches both the device and the
+            # artifact. Resolving before execute is what makes the record a
+            # statement about what happened rather than about what was asked.
+            try:
+                model_ms, model_notes = hold.from_arguments(parsed.arguments)
+            except ValueError as exc:
+                record["error"] = f"{exc}{truncation_note(completion)}"
+                turns.append(record)
+                _write_json(out_dir / f"turn_{index:03d}.json", record)
+                emit(record)
+                return finish("parse_error", record["error"])
+            resolved = hold.resolve(
+                instruction_ms,
+                model_ms,
+                settings.long_press_ms,
+                hold_floor_ms,
+                hold_ceiling_ms,
+                notes=instruction_notes + model_notes,
+            )
+            pixels["duration_ms"] = resolved.ms
+            record["hold"] = resolved.as_dict()
+
         # Marked on the screen the model was looking at, not the one after the
         # action, so the picture shows what it aimed at rather than where that
         # left the app.
@@ -211,7 +304,7 @@ def run(
             if outcome.holds is True:
                 return finish("verified", f"oracle confirmed actor claim at turn {index}")
             if outcome.holds is None:
-                return finish("oracle_error", outcome.detail)
+                return finish(oracle_status(outcome), outcome.detail)
             if record["actor_status"].lower() == "fail":
                 return finish("actor_gave_up", "actor and oracle agreed success was absent")
 
@@ -266,7 +359,7 @@ def run(
                     if outcome.holds is True:
                         return finish("verified", "oracle confirmed success despite repetition")
                     if outcome.holds is None:
-                        return finish("oracle_error", outcome.detail)
+                        return finish(oracle_status(outcome), outcome.detail)
                 return finish("stuck", stuck.detail)
         index += 1
 
@@ -278,5 +371,5 @@ def run(
         if outcome.holds is True:
             return finish("verified", "oracle confirmed success on the final check")
         if outcome.holds is None:
-            return finish("oracle_error", outcome.detail)
+            return finish(oracle_status(outcome), outcome.detail)
     return finish("budget_exhausted", "action or wait budget exhausted")

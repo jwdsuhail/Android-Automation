@@ -1,0 +1,104 @@
+@import "tailwindcss";
+/* Self-hosted so the console works with no network, which is the whole
+   point of a tool that runs next to an emulator. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+/* Forced black. Canvas, panels and raised blocks share one ground so the
+   page is a single black field; hover and selection still lift so a row can
+   be told from the one next to it. Borders mark the columns and nothing
+   else: rows are separated by their own spacing, and the turn list by a
+   single vertical rail, so no rule is drawn between one row and the next. */
+:root {
+  color-scheme: dark;
+
+  --canvas: #000000;
+  --panel: #000000;
+  --raised: #000000;
+  --hover: #141414;
+  --border: #222222;
+  --border-strong: #333333;
+  --text: #ededed;
+  --dim: #c4c4cb;
+  --faint: #9a9aa3;
+
+  --pass: #56d364;
+  --agent: #ff9492;
+  --infra: #e3b341;
+  --incomplete: #9a9aa3;
+
+  --accent: #79b8ff;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-dim: var(--dim);
+  --color-faint: var(--faint);
+  --color-pass: var(--pass);
+  --color-agent: var(--agent);
+  --color-infra: var(--infra);
+  --color-incomplete: var(--incomplete);
+  --color-accent: var(--accent);
+
+  /* Three radii, each with one job, so that a nested corner is never rounder
+     than the corner containing it. xs is for leaves: chips, badges, segment
+     buttons. sm is for blocks set into a card: images, <pre>. md is for the
+     cards themselves. There is no lg; nothing here is big enough to need it. */
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-md: 7px;
+
+  --font-sans: "Geist Variable", "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  background: #000000;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Coordinates, latencies and deltas are read down a column, so they have to
+   sit in the same place on every row. */
+.nums {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-xs);
+}
+
+/* Only render scrollbars that carry information. */
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  overscroll-behavior: contain;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

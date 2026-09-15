@@ -1,0 +1,198 @@
+"""Reading the runs directory, including the runs that did not finish."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from android_runner.console.reader import (
+    AGENT,
+    INCOMPLETE,
+    INFRASTRUCTURE,
+    PASS,
+    RunStore,
+)
+
+CLICK = {
+    "index": 0,
+    "action": "click",
+    "narration": "Tap the FYI app icon.",
+    "arguments": {"action": "click", "coordinate": [228, 640]},
+    "pixels": {"action": "click", "coordinate": [246, 1551]},
+    "moved": True,
+}
+WAIT = {"index": 1, "action": "wait", "arguments": {"action": "wait", "time": 5}, "pixels": {}}
+
+
+def write_turns(run_dir: Path, turns: list[dict[str, Any]]) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for turn in turns:
+        path = run_dir / f"turn_{turn['index']:03d}.json"
+        path.write_text(json.dumps(turn), encoding="utf-8")
+
+
+def complete_run(
+    root: Path, run_id: str, *, status: str = "verified", turns: list[dict[str, Any]] | None = None
+) -> Path:
+    turns = [CLICK] if turns is None else turns
+    run_dir = root / run_id
+    write_turns(run_dir, turns)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "status": status,
+                "verified": status == "verified",
+                "error_class": None if status == "verified" else "agent",
+                "instruction": "Open FYI",
+                "success": "the project is sent",
+                "detail": "done",
+                "actions": 1,
+                "waits": 0,
+                "elapsed_s": 12.5,
+                "turns": turns,
+                "checks": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return run_dir
+
+
+def test_a_finished_run_reads_back_from_run_json(tmp_path: Path) -> None:
+    complete_run(tmp_path, "20260914T121427Z")
+    summary = RunStore(tmp_path).summary("20260914T121427Z")
+    assert summary is not None
+    assert summary.outcome == PASS
+    assert summary.complete is True
+    assert summary.instruction == "Open FYI"
+    assert summary.turn_count == 1
+    assert summary.started_at == "2026-09-14T12:14:27Z"
+
+
+def test_a_run_with_no_run_json_is_rebuilt_from_its_turns(tmp_path: Path) -> None:
+    """The run that crashed is the one worth reading, so it is not skipped."""
+    write_turns(tmp_path / "20260908T164612Z", [CLICK, WAIT])
+    summary = RunStore(tmp_path).summary("20260908T164612Z")
+    assert summary is not None
+    assert summary.outcome == INCOMPLETE
+    assert summary.complete is False
+    assert summary.turn_count == 2
+    assert summary.waits == 1
+    assert summary.actions == 1
+    # finish() is the only writer of the instruction, so a crash loses it.
+    assert summary.instruction == ""
+
+
+def test_a_run_directory_with_nothing_in_it_still_lists(tmp_path: Path) -> None:
+    (tmp_path / "20260914T092631Z").mkdir(parents=True)
+    summary = RunStore(tmp_path).summary("20260914T092631Z")
+    assert summary is not None
+    assert summary.outcome == INCOMPLETE
+    assert summary.turn_count == 0
+
+
+def test_one_unreadable_run_does_not_hide_the_others(tmp_path: Path) -> None:
+    complete_run(tmp_path, "20260914T121427Z")
+    broken = tmp_path / "20260914T100102Z"
+    broken.mkdir(parents=True)
+    (broken / "run.json").write_text("{ truncated", encoding="utf-8")
+
+    summaries = RunStore(tmp_path).summaries()
+    assert [s.id for s in summaries] == ["20260914T121427Z", "20260914T100102Z"]
+    # A half-written run.json is reconstructed, not dropped.
+    assert summaries[1].outcome == INCOMPLETE
+
+
+def test_a_dead_server_never_reads_as_a_failed_task(tmp_path: Path) -> None:
+    """The agent/infrastructure split is the whole point of the badge."""
+    for status in ("device_error", "model_error", "oracle_error", "oracle_inconclusive"):
+        complete_run(tmp_path, f"run_{status}", status=status)
+    for status in (
+        "parse_error",
+        "stuck",
+        "budget_exhausted",
+        "timed_out",
+        "actor_gave_up",
+        "actor_claimed_success",
+    ):
+        complete_run(tmp_path, f"run_{status}", status=status)
+    complete_run(tmp_path, "run_verified", status="verified")
+
+    outcomes = {s.id: s.outcome for s in RunStore(tmp_path).summaries()}
+    assert outcomes["run_verified"] == PASS
+    assert outcomes["run_oracle_inconclusive"] == INFRASTRUCTURE
+    assert outcomes["run_device_error"] == INFRASTRUCTURE
+    assert outcomes["run_stuck"] == AGENT
+    assert outcomes["run_timed_out"] == AGENT
+
+
+def test_runs_are_listed_newest_first(tmp_path: Path) -> None:
+    for run_id in ("20260908T095613Z", "20260914T121427Z", "20260911T075139Z"):
+        complete_run(tmp_path, run_id)
+    assert [s.id for s in RunStore(tmp_path).summaries()] == [
+        "20260914T121427Z",
+        "20260911T075139Z",
+        "20260908T095613Z",
+    ]
+
+
+def test_a_missing_runs_directory_is_empty_not_an_error(tmp_path: Path) -> None:
+    assert RunStore(tmp_path / "nope").summaries() == []
+
+
+def test_an_out_dir_that_is_not_a_timestamp_has_no_start_time(tmp_path: Path) -> None:
+    complete_run(tmp_path, "my-experiment")
+    summary = RunStore(tmp_path).summary("my-experiment")
+    assert summary is not None
+    assert summary.started_at is None
+
+
+def test_detail_carries_the_line_the_terminal_prints(tmp_path: Path) -> None:
+    complete_run(tmp_path, "20260914T121427Z")
+    detail = RunStore(tmp_path).detail("20260914T121427Z")
+    assert detail is not None
+    assert detail.turns[0]["line"] == (
+        "click 228,640 of 1000 [mid-left], px 246,1551 moved"
+    )
+
+
+def test_detail_of_an_unfinished_run_comes_from_the_turn_files(tmp_path: Path) -> None:
+    write_turns(tmp_path / "20260908T164612Z", [CLICK, WAIT])
+    detail = RunStore(tmp_path).detail("20260908T164612Z")
+    assert detail is not None
+    assert len(detail.turns) == 2
+    assert detail.checks == []
+    assert "never written" in detail.detail
+
+
+def test_an_unknown_run_has_no_detail(tmp_path: Path) -> None:
+    assert RunStore(tmp_path).detail("nope") is None
+
+
+def test_only_artifacts_the_runner_writes_can_be_served(tmp_path: Path) -> None:
+    run_dir = complete_run(tmp_path, "20260914T121427Z")
+    (run_dir / "turn_000.marked.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "secret.txt").write_text("no", encoding="utf-8")
+    store = RunStore(tmp_path)
+
+    assert store.artifact("20260914T121427Z", "turn_000.marked.png") is not None
+    assert store.artifact("20260914T121427Z", "../secret.txt") is None
+    assert store.artifact("20260914T121427Z", "../../etc/passwd") is None
+    assert store.artifact("20260914T121427Z", "/etc/passwd") is None
+    assert store.artifact("20260914T121427Z", "turn_000.png") is None  # not on disk
+    assert store.artifact("20260914T121427Z", "notes.txt") is None
+
+
+def test_a_summary_is_reread_when_the_run_changes(tmp_path: Path) -> None:
+    """The cache is keyed on mtime, so a live run must not serve a stale row."""
+    run_dir = complete_run(tmp_path, "20260914T121427Z", status="stuck")
+    store = RunStore(tmp_path)
+    assert store.summary("20260914T121427Z").outcome == AGENT  # type: ignore[union-attr]
+
+    complete_run(tmp_path, "20260914T121427Z", status="verified")
+    import os
+
+    stamp = run_dir.stat().st_mtime + 10
+    os.utime(run_dir, (stamp, stamp))
+    assert store.summary("20260914T121427Z").outcome == PASS  # type: ignore[union-attr]

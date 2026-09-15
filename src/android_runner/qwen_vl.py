@@ -49,7 +49,7 @@ Action: One short sentence naming what you do now.
 
 To open an app, tap its icon on the screen. If you cannot see the icon, press the Home button and look again, or swipe to reach the rest of the app list. There is no command that launches an app by name.
 
-A control that says hold, press and hold, or hold to confirm needs long_press, not click. A tap on such a control does nothing at all. Set duration_ms to about 2000-3000 for a hold-to-confirm button, and about 800 for a context menu. If the instruction tells you how long to hold, use that.
+A control that says hold, press and hold, or hold to confirm needs long_press, not click. A tap on such a control does nothing at all. duration_ms is milliseconds, not seconds: one second is 1000. Set duration_ms to about 2000-3000 for a hold-to-confirm button, and about 800 for a context menu. If the instruction names a hold time, use it: "for 3 seconds" means duration_ms 3000.
 
 For swipe, coordinate is where the finger starts and coordinate2 is where it ends. To scroll a list down the screen, start low and end high.
 
@@ -68,6 +68,16 @@ _THOUGHT_LINE = (
     " chose this element. If the target is not visible, say so and swipe to"
     " look for it.\n"
 )
+
+# The unit lives in two places that have to agree: the action space example
+# and the sentence about holding. Both are anchors because the derived
+# no-think and reflection prompts are built by string replacement, and an edit
+# that renames either one would drop it from the derived copies without
+# failing anything.
+_LONG_PRESS_ACTION = (
+    '{"action": "long_press", "coordinate": [x, y], "duration_ms": 1000}'
+)
+_DURATION_UNIT = "duration_ms is milliseconds, not seconds: one second is 1000."
 
 _NO_THINK_REQUEST = "return an Action line, then a json object"
 _ACTION_LINE_TEXT = "Action: One short sentence naming what you do now.\n"
@@ -107,6 +117,12 @@ def _assert_derived() -> None:
             )
     if _ACTION_LINE_TEXT not in SYSTEM_PROMPT:
         raise AssertionError("reflection prompt derivation lost the Action line")
+    for prompt in (SYSTEM_PROMPT, NO_THINK_SYSTEM_PROMPT):
+        for anchor in (_LONG_PRESS_ACTION, _DURATION_UNIT):
+            if anchor not in prompt:
+                raise AssertionError(
+                    f"a prompt no longer states the hold duration: {anchor[:40]!r}"
+                )
 
 
 _assert_derived()
@@ -535,3 +551,14 @@ def build_messages(
         _image_message(png, f"{NOW_LABEL} {note}".strip() if note else NOW_LABEL)
     )
     return drop_old_images(messages, history_n)
+
+
+def warmup_messages(png: bytes) -> list[dict[str, Any]]:
+    """A throwaway call that compiles the vision path before a run starts.
+
+    It carries a real screenshot so it travels the same downscale and produces
+    the same image-token count as a live turn. A smaller or synthetic image
+    warms a different shape and leaves the first real call paying the cold
+    start anyway.
+    """
+    return [_image_message(png, "Warm-up only. Reply with the single word ready.")]

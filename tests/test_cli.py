@@ -1,73 +1,42 @@
-"""How a turn is rendered for the terminal."""
+"""How a run result becomes an exit code and a JSON footer."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from android_runner.cli import _region, _target
+from android_runner.cli import _exit_code, _oracle_summary
 
 
-def turn(grid: dict[str, Any], pixels: dict[str, Any]) -> dict[str, object]:
-    return {"arguments": grid, "pixels": pixels}
+
+def test_only_a_verified_run_exits_zero() -> None:
+    assert _exit_code({"verified": True, "error_class": None}) == 0
 
 
-def test_region_names_each_corner() -> None:
-    assert _region([0, 0]) == "top-left"
-    assert _region([999, 0]) == "top-right"
-    assert _region([0, 999]) == "bottom-left"
-    assert _region([999, 999]) == "bottom-right"
+def test_a_failed_task_and_a_dead_harness_do_not_share_an_exit_code() -> None:
+    """Exit 1 means the agent did not get there. Exit 2 means the run carries
+    no signal about the agent at all."""
+    assert _exit_code({"verified": False, "error_class": "agent"}) == 1
+    assert _exit_code({"verified": False, "error_class": "infrastructure"}) == 2
 
 
-def test_region_collapses_the_middle_of_the_screen_to_one_word() -> None:
-    assert _region([500, 500]) == "center"
-    assert _region([500, 100]) == "top-center"
-    assert _region([100, 500]) == "mid-left"
-
-
-def test_region_clamps_the_far_edge_of_the_grid() -> None:
-    # 1000 is inside to_pixels' accepted range, and 1000 * 3 // 1000 is 3.
-    assert _region([1000, 1000]) == "bottom-right"
-
-
-def test_region_ignores_values_that_are_not_a_point() -> None:
-    assert _region([1, 2, 3, 4]) is None
-    assert _region("nope") is None
-    assert _region([None, 5]) is None
-
-
-def test_click_target_carries_the_region_beside_the_numbers() -> None:
-    detail = _target(
-        turn(
-            {"action": "click", "coordinate": [782, 61]},
-            {"action": "click", "coordinate": [844, 147]},
-        )
-    )
-    assert detail == " 782,61 of 1000 [top-right], px 844,147"
-
-
-def test_swipe_target_names_both_ends() -> None:
-    detail = _target(
-        turn(
-            {"action": "swipe", "coordinate": [500, 800], "coordinate2": [500, 200]},
-            {"action": "swipe", "coordinate": [540, 1920], "coordinate2": [540, 480]},
-        )
-    )
-    assert "[bottom-center -> top-center]" in detail
-    assert "px 540,1920 -> 540,480" in detail
-
-
-def test_long_press_keeps_its_duration_after_the_region() -> None:
-    detail = _target(
-        turn(
-            {"action": "long_press", "coordinate": [500, 812], "duration_ms": 1500},
-            {"action": "long_press", "coordinate": [540, 1968], "duration_ms": 1500},
-        )
-    )
-    assert detail == " 500,812 of 1000 [bottom-center], px 540,1968, 1500ms"
-
-
-def test_placeless_actions_are_unchanged_by_the_region() -> None:
-    assert _target(turn({"action": "type", "text": "Test 14"}, {})) == ' "Test 14"'
-    assert _target(turn({"action": "wait", "time": 5}, {})) == " 5s"
-    assert _target(turn({"action": "system_button", "button": "Back"}, {})) == " Back"
-    assert _target(turn({"action": "terminate", "status": "fail"}, {})) == " fail"
+def test_oracle_summary_shows_both_answers_when_they_agree() -> None:
+    result = {
+        "checks": [
+            {
+                "holds": None,
+                "kind": "inconclusive",
+                "condition": "fail",
+                "negation": "fail",
+                "detail": "oracle gave the same answer to the predicate and its negation",
+                "raw": "Action: Terminate with status fail because test 14 is not visible.\n",
+                "negated_raw": "Action: Terminate with status fail.\n",
+            }
+        ]
+    }
+    oracle = _oracle_summary(result)
+    assert oracle is not None
+    assert oracle["condition"] == "fail"
+    assert oracle["negation"] == "fail"
+    assert oracle["condition_said"].startswith("Terminate with status fail because")
+    assert oracle["negation_said"] == "Terminate with status fail."
+    assert "same answer" in oracle["detail"]

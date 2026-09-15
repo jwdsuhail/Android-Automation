@@ -7,88 +7,13 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from android_runner.client import ModelClient
 from android_runner.config import Settings, load_env_file
 from android_runner.device import AdbDevice
-from android_runner.qwen_vl import COORD_SCALE
+from android_runner.format import action_said, target
 from android_runner.runner import Budget, run
-
-
-def _point(value: object) -> str | None:
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        return f"{value[0]},{value[1]}"
-    return None
-
-
-_ROWS = ("top", "mid", "bottom")
-_COLUMNS = ("left", "center", "right")
-
-
-def _third(value: float, names: tuple[str, str, str]) -> str:
-    return names[min(2, max(0, int(value * 3 // COORD_SCALE)))]
-
-
-def _region(value: object) -> str | None:
-    """Name the ninth of the screen a grid point falls in.
-
-    Derived from the coordinate rather than asked of the model, so it cannot
-    disagree with where the tap actually goes. That is the whole point: read
-    against the narration it tells you whether the model hit what it named.
-    "Tap the send button" over `bottom-left` is a grounding failure that
-    otherwise only shows up as a screenshot nobody opened.
-    """
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        return None
-    try:
-        x, y = float(value[0]), float(value[1])
-    except (TypeError, ValueError):
-        return None
-    row, column = _third(y, _ROWS), _third(x, _COLUMNS)
-    return "center" if (row, column) == ("mid", "center") else f"{row}-{column}"
-
-
-def _target(turn: dict[str, object]) -> str:
-    """The part of the reply the narration leaves out: what it aimed at.
-
-    The sentence says "the plus button"; only the coordinate says *where* the
-    model thought that was. Grid and pixels are both shown because a tap that
-    lands wrong is either a misread screen (grid) or a bad mapping (pixels),
-    and the pair tells them apart without opening turn_NNN.json. The bracketed
-    region restates the grid point in words, because "782,61" only reads as
-    the top right corner once you have done the arithmetic.
-    """
-    grid = turn.get("arguments")
-    pixels = turn.get("pixels")
-    if not isinstance(grid, dict) or not isinstance(pixels, dict):
-        return ""
-
-    action = grid.get("action")
-    if action == "type":
-        return f' "{grid.get("text", "")}"'
-    if action == "system_button":
-        return f" {grid.get('button', '?')}"
-    if action == "wait":
-        return f" {grid.get('time', '?')}s"
-    if action == "terminate":
-        return f" {grid.get('status', '?')}"
-
-    for start, end in (("coordinate", "coordinate2"), ("start_coordinate", "end_coordinate")):
-        first = _point(grid.get(start))
-        if first is None:
-            continue
-        second = _point(grid.get(end))
-        span = first if second is None else f"{first} -> {second}"
-        where = _region(grid.get(start))
-        if second is not None:
-            where = f"{where} -> {_region(grid.get(end))}"
-        detail = f" {span} of 1000 [{where}], px {_point(pixels.get(start))}"
-        if second is not None:
-            detail += f" -> {_point(pixels.get(end))}"
-        if action == "long_press":
-            detail += f", {grid.get('duration_ms', '?')}ms"
-        return detail
-    return ""
 
 
 def _print_turn(turn: dict[str, object]) -> None:
@@ -105,7 +30,67 @@ def _print_turn(turn: dict[str, object]) -> None:
     action = turn.get("action", "?")
     moved = turn.get("moved")
     suffix = "" if moved is None else (" moved" if moved else " no-change")
-    print(f"     -> {action}{_target(turn)}{suffix}", file=sys.stderr, flush=True)
+    print(f"     -> {action}{target(turn)}{suffix}", file=sys.stderr, flush=True)
+    held = turn.get("hold")
+    if isinstance(held, dict):
+        for hold_note in held.get("notes") or ():
+            print(f"     hold: {hold_note}", file=sys.stderr, flush=True)
+
+
+def _print_check(check: dict[str, object]) -> None:
+    """Show the judge's two answers, not only that they failed to pair."""
+    holds = check.get("holds")
+    if holds is True:
+        label = "pass"
+    elif holds is False:
+        label = "fail"
+    else:
+        label = str(check.get("kind") or "no-verdict")
+    print(f"     oracle: {label}", file=sys.stderr, flush=True)
+    condition = check.get("condition")
+    if condition:
+        said = action_said(check.get("raw"))
+        suffix = f" — {said}" if said else ""
+        print(f"     condition: {condition}{suffix}", file=sys.stderr, flush=True)
+    negation = check.get("negation")
+    if negation:
+        said = action_said(check.get("negated_raw"))
+        suffix = f" — {said}" if said else ""
+        print(f"     negation: {negation}{suffix}", file=sys.stderr, flush=True)
+    detail = check.get("detail")
+    if holds is None and detail:
+        print(f"     reason: {detail}", file=sys.stderr, flush=True)
+
+
+def _oracle_summary(result: dict[str, Any]) -> dict[str, Any] | None:
+    """The last check, compacted for the JSON footer."""
+    checks = result.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return None
+    last = checks[-1]
+    if not isinstance(last, dict):
+        return None
+    payload = {
+        "holds": last.get("holds"),
+        "kind": last.get("kind"),
+        "condition": last.get("condition"),
+        "negation": last.get("negation"),
+        "detail": last.get("detail"),
+        "condition_said": action_said(last.get("raw")),
+        "negation_said": action_said(last.get("negated_raw")),
+    }
+    return payload
+
+
+def _exit_code(result: dict[str, Any]) -> int:
+    """0 verified, 1 the agent did not get there, 2 nothing was measured.
+
+    An infrastructure failure is not a failed task. The run carries no signal
+    about the agent, so it must not read from the shell like one that does.
+    """
+    if result.get("verified"):
+        return 0
+    return 2 if result.get("error_class") == "infrastructure" else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,7 +106,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-actions", type=int, default=20)
     parser.add_argument("--max-waits", type=int, default=12)
     parser.add_argument("--wall-clock-s", type=float, default=240)
-    parser.add_argument("--verify-timeout-s", type=float, default=8)
+    parser.add_argument(
+        "--verify-timeout-s",
+        type=float,
+        default=None,
+        help="Per-oracle-call ceiling. Defaults to MODEL_TIMEOUT_S, the same "
+        "ceiling the actor gets.",
+    )
+    parser.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help="Skip the throwaway first call. The first real call then pays for "
+        "model load and graph capture itself.",
+    )
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--no-env-file", action="store_true")
@@ -129,8 +126,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.max_actions < 1 or args.max_waits < 1:
         parser.error("--max-actions and --max-waits must be at least 1")
-    if args.wall_clock_s <= 0 or args.verify_timeout_s <= 0:
-        parser.error("--wall-clock-s and --verify-timeout-s must be greater than 0")
+    if args.wall_clock_s <= 0:
+        parser.error("--wall-clock-s must be greater than 0")
+    if args.verify_timeout_s is not None and args.verify_timeout_s <= 0:
+        parser.error("--verify-timeout-s must be greater than 0")
 
     if not args.no_env_file:
         loaded = load_env_file(args.env_file)
@@ -157,8 +156,10 @@ def main(argv: list[str] | None = None) -> int:
             max_waits=args.max_waits,
             wall_clock_s=args.wall_clock_s,
             verify_timeout_s=args.verify_timeout_s,
+            warmup=not args.no_warmup,
         ),
         on_turn=_print_turn,
+        on_check=_print_check,
     )
 
     summary = {
@@ -166,17 +167,20 @@ def main(argv: list[str] | None = None) -> int:
         for key in (
             "status",
             "verified",
+            "error_class",
             "detail",
             "actions",
             "waits",
             "elapsed_s",
         )
     }
+    oracle = _oracle_summary(result)
+    if oracle is not None:
+        summary["oracle"] = oracle
     print(json.dumps(summary, indent=2))
     print(f"wrote {out_dir}")
 
-    # Exit 0 is reserved for independently verified success.
-    return 0 if result["verified"] else 1
+    return _exit_code(result)
 
 
 if __name__ == "__main__":

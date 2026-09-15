@@ -32,3 +32,25 @@ def test_reflection_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings.from_env()
     assert settings.model_reflection is True
     assert settings.model_thinking is False
+
+
+def test_a_hold_longer_than_the_adb_call_is_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`input swipe` blocks for the whole hold, so a hold past ADB_TIMEOUT_S
+    kills its own call. The bound is derived from that timeout rather than
+    being a second number that can drift away from it."""
+    monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
+    monkeypatch.setenv("ADB_TIMEOUT_S", "10")
+    monkeypatch.setenv("ADB_LONG_PRESS_MS", "9000")
+    with pytest.raises(ValueError, match="between 1 and 8000"):
+        Settings.from_env()
+
+
+def test_a_longer_adb_timeout_permits_a_longer_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
+    monkeypatch.setenv("ADB_TIMEOUT_S", "60")
+    monkeypatch.setenv("ADB_LONG_PRESS_MS", "9000")
+    assert Settings.from_env().long_press_ms == 9000
