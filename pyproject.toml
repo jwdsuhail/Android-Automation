@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minimal-android-runner"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Self-contained ADB and vision-model runner with optional oracle verification."
 requires-python = ">=3.10"
 dependencies = [
@@ -22,6 +22,9 @@ model-console = "android_runner.console.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "android_runner.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

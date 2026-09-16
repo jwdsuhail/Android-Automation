@@ -72,7 +72,6 @@ def test_unique_id_steps_around_a_name_already_taken(tmp_path: Path) -> None:
     [
         ({"max_actions": 0}, "max_actions must be at least 1"),
         ({"max_waits": 0}, "max_waits must be at least 1"),
-        ({"wall_clock_s": 0}, "wall_clock_s must be greater than 0"),
         ({"verify_timeout_s": -1}, "verify_timeout_s must be greater than 0"),
         ({"instruction": "   "}, "instruction must not be empty"),
         ({"name": ""}, "name must not be empty"),
@@ -99,12 +98,26 @@ def test_numbers_arriving_as_strings_from_a_form_are_coerced() -> None:
             "name": "Audio metadata",
             "instruction": "Open the chat",
             "max_actions": "70",
-            "wall_clock_s": "2400",
         }
     )
     assert case.max_actions == 70
-    assert case.wall_clock_s == 2400.0
     assert case.id == "audio-metadata"
+
+
+def test_a_case_file_from_before_the_wall_clock_was_dropped_still_loads() -> None:
+    """There is no migration step and there should not be one: a key nothing
+    reads any more is a key from a later - or earlier - version, and from_dict
+    already promises to ignore those rather than refuse the file."""
+    case = Case.from_dict(
+        {
+            "name": "Audio metadata",
+            "instruction": "Open the chat",
+            "wall_clock_s": 2400,
+        }
+    )
+    case.validate()
+    assert not hasattr(case, "wall_clock_s")
+    assert "wall_clock_s" not in case.as_dict()
 
 
 def test_a_number_that_is_not_a_number_says_which_field() -> None:

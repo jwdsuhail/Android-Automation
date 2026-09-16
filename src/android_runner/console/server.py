@@ -79,6 +79,10 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="Android runner console", docs_url=None, redoc_url=None)
     runs_dir = Path(runs_dir)
+    # `main` always passes `--cases-dir` (default `cases`), so this fallback is
+    # for programmatic callers only and deliberately does not have to match the
+    # flag default. Changing one to agree with the other would silently move
+    # where an embedding caller reads cases from.
     cases_dir = Path(cases_dir) if cases_dir is not None else runs_dir.parent / "cases"
     store = RunStore(runs_dir)
     cases = CaseStore(cases_dir)
@@ -134,8 +138,8 @@ def create_app(
                     yield _sse("turn", turns[sent])
                     sent += 1
                     last_change = time.monotonic()
-                # `started_at` rides along because a reattached watcher has no
-                # idea when the run began, and a wall-clock meter counting from
+                # `started_at` rides along because a reattached watcher has
+                # no idea when the run began, and an elapsed time counting from
                 # the moment the page opened would be a lie.
                 yield _sse(
                     "status",
@@ -196,6 +200,25 @@ def create_app(
         headers = {} if mutable else {"Cache-Control": IMMUTABLE}
         return FileResponse(path, headers=headers)
 
+    def _no_case(case_id: str) -> str:
+        """One wording for a missing case, wherever the lookup happened.
+
+        The three endpoints below reach for a case in three different ways
+        (`get`, `exists`, `delete`), and a caller should not be able to tell
+        which one it hit from the 404 it gets back.
+        """
+        return f"no case named {case_id!r} in {cases_dir}"
+
+    def require_case(case_id: str) -> Case:
+        """The case, or the right HTTPException. Never None."""
+        try:
+            case = cases.get(case_id)
+        except ValueError as exc:
+            raise HTTPException(422, f"{case_id} will not parse: {exc}") from exc
+        if case is None:
+            raise HTTPException(404, _no_case(case_id))
+        return case
+
     # ---- cases -----------------------------------------------------------
 
     @app.get("/api/cases")
@@ -218,18 +241,12 @@ def create_app(
 
     @app.get("/api/cases/{case_id}")
     def get_case(case_id: str) -> dict[str, object]:
-        try:
-            case = cases.get(case_id)
-        except ValueError as exc:
-            raise HTTPException(422, f"{case_id} will not parse: {exc}") from exc
-        if case is None:
-            raise HTTPException(404, f"no case named {case_id!r} in {cases_dir}")
-        return case.as_dict()
+        return require_case(case_id).as_dict()
 
     @app.put("/api/cases/{case_id}")
     def update_case(case_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, object]:
         if not cases.exists(case_id):
-            raise HTTPException(404, f"no case named {case_id!r} in {cases_dir}")
+            raise HTTPException(404, _no_case(case_id))
         try:
             existing = cases.get(case_id)
         except ValueError:
@@ -246,7 +263,7 @@ def create_app(
     @app.delete("/api/cases/{case_id}", status_code=204)
     def delete_case(case_id: str) -> None:
         if not cases.delete(case_id):
-            raise HTTPException(404, f"no case named {case_id!r} in {cases_dir}")
+            raise HTTPException(404, _no_case(case_id))
 
     @app.get("/api/active")
     def active() -> dict[str, object]:
@@ -257,12 +274,7 @@ def create_app(
 
         @app.post("/api/cases/{case_id}/run", status_code=202)
         def run_case(case_id: str) -> JSONResponse:
-            try:
-                case = cases.get(case_id)
-            except ValueError as exc:
-                raise HTTPException(422, f"{case_id} will not parse: {exc}") from exc
-            if case is None:
-                raise HTTPException(404, f"no case named {case_id!r} in {cases_dir}")
+            case = require_case(case_id)
             try:
                 launch = launcher.launch(case)
             except Busy as exc:

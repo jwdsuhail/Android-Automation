@@ -48,11 +48,6 @@ def screen_change(before: bytes, after: bytes) -> ScreenChange:
     return ScreenChange(mean=mean, tile_max=tile_max)
 
 
-def screen_delta(before: bytes, after: bytes) -> float:
-    """Global mean, kept for artifact continuity with older runs."""
-    return screen_change(before, after).mean
-
-
 @dataclass(frozen=True)
 class Settled:
     png: bytes

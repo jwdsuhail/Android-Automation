@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from android_runner.cases import Case
+from android_runner.runner import new_run_id
 
 # The child is `python -m android_runner.cli`, not `model-run`. The console may
 # be running from a virtualenv whose scripts are not on PATH, and sys.executable
@@ -87,7 +88,7 @@ class Launcher:
         Generated here and passed as `--out` so the id is known before the child
         starts, which is what lets the caller be handed a URL immediately.
         """
-        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return new_run_id()
 
     def active(self) -> Launch | None:
         with self._lock:

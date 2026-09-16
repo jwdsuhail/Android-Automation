@@ -21,7 +21,13 @@ from pathlib import Path
 from typing import Any
 
 from android_runner import format as fmt
-from android_runner.runner import error_class
+from android_runner.runner import (
+    AGENT,
+    INFRASTRUCTURE,
+    ORACLE,
+    RUN_ID_STAMP,
+    error_class,
+)
 
 # Every artifact `runner.run()` can write, and nothing else. The file endpoint
 # matches against this rather than joining user input onto a path.
@@ -33,17 +39,19 @@ ARTIFACT = re.compile(
     r"|verify_\d{3}\.png)$"
 )
 
-_STAMP = "%Y%m%dT%H%M%SZ"
 
 # The outcome a badge is drawn from. `error_class` already owns the split that
 # matters - a dead server is not a failed task - so this only adds the state
 # that exists on disk but never inside a result: no result at all.
+# AGENT, INFRASTRUCTURE and ORACLE are re-exported from `runner` rather than
+# re-declared: they are exactly what `error_class` returns, and a badge that
+# disagreed with the field it is drawn from would be invisible until it was
+# wrong on screen. ORACLE earns its own badge rather than the wrench - a judge
+# that answered and was unusable is not a broken harness, and filing it as one
+# made the board over-report breakage.
 PASS = "pass"
-AGENT = "agent"
-INFRASTRUCTURE = "infrastructure"
-# Its own badge, not the wrench. A judge that answered and was unusable is not
-# a broken harness, and filing it as one made the board over-report breakage.
-ORACLE = "oracle"
+# The one outcome with no counterpart in `error_class`: there is no result on
+# disk at all.
 INCOMPLETE = "incomplete"
 
 
@@ -99,7 +107,7 @@ class RunDetail:
 def _started_at(run_id: str) -> str | None:
     """The directory name is a UTC stamp, unless `--out` named it something else."""
     try:
-        parsed = datetime.strptime(run_id, _STAMP).replace(tzinfo=timezone.utc)
+        parsed = datetime.strptime(run_id, RUN_ID_STAMP).replace(tzinfo=timezone.utc)
     except ValueError:
         return None
     return parsed.isoformat().replace("+00:00", "Z")

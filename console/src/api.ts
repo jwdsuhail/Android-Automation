@@ -97,7 +97,6 @@ export interface Case {
   success: string | null;
   max_actions: number;
   max_waits: number;
-  wall_clock_s: number;
   verify_timeout_s: number | null;
   warmup: boolean;
   created_at: string;

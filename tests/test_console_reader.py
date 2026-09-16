@@ -128,6 +128,8 @@ def test_a_dead_server_never_reads_as_a_failed_task(tmp_path: Path) -> None:
     # read, and a wrench next to that sends you to restart a healthy server.
     assert outcomes["run_oracle_inconclusive"] == ORACLE
     assert outcomes["run_stuck"] == AGENT
+    # Nothing writes `timed_out` any more. Runs that already carry it still
+    # have to read as a failed task rather than fall off the taxonomy.
     assert outcomes["run_timed_out"] == AGENT
 
 

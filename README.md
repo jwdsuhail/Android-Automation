@@ -9,7 +9,6 @@ from the parent project.
 - One command: `model-run`
 - One autonomous loop
 - Optional independent success check
-- One wall-clock deadline
 - Separate action and wait budgets
 - Repeat/oscillation detection
 - In-call Check/Expect reflection on the actor, not a second model call
@@ -69,16 +68,23 @@ model-run \
   --instruction "Open the Test 14 chat and update the audio metadata" \
   --success "the audio message is labelled Verified Track with the artist Harness" \
   --max-actions 70 \
-  --max-waits 20 \
-  --wall-clock-s 2400
+  --max-waits 20
 ```
+
+Nothing caps a run by elapsed time. There used to be a wall-clock deadline and
+it was the wrong bound: a case that legitimately needs twenty minutes is not a
+case that has hung, and the deadline could not tell them apart. What bounds a
+run is `--max-actions` and `--max-waits`, with `MODEL_TIMEOUT_S` and
+`ADB_TIMEOUT_S` bounding each individual call, so the worst case is the action
+budget times the slowest call rather than one number picked in advance. A run
+that really is wedged is stopped the way any other process is.
 
 ### Exit codes
 
 | Code | Meaning | Statuses |
 |------|---------|----------|
 | `0` | The independent checker verified `--success`. | `verified` |
-| `1` | The run measured the agent and it did not get there. | `parse_error`, `stuck`, `budget_exhausted`, `timed_out`, `actor_gave_up`, `actor_claimed_success` |
+| `1` | The run measured the agent and it did not get there. | `parse_error`, `stuck`, `budget_exhausted`, `actor_gave_up`, `actor_claimed_success` |
 | `2` | Nothing was measured. The result says nothing about the agent. | `device_error`, `model_error`, `oracle_error`, `oracle_inconclusive`, configuration refusal |
 
 `run.json` carries the same split as `error_class`: `"agent"`,
@@ -196,7 +202,6 @@ no database, for the same reason `runs/` has neither:
   "success": "the audio message is labelled Verified Track with the artist Harness",
   "max_actions": 70,
   "max_waits": 20,
-  "wall_clock_s": 2400,
   "verify_timeout_s": null,
   "warmup": true
 }
@@ -473,9 +478,9 @@ than skipped, on the same principle as an unfinished run. A case keeps its id
 when you rename it, so the runs that recorded it still point at something.
 
 **Run** starts `model-run --case` as a subprocess and streams the run as it
-happens: turns append with their screenshots, and two meters show the action
-and wall-clock budgets being spent, which are the numbers that decide whether
-the run dies. A second Run while one is in flight is refused rather than
+happens: turns append with their screenshots, a meter shows the action budget
+being spent - the number that decides whether the run dies - and the elapsed
+time counts up beside it. A second Run while one is in flight is refused rather than
 queued - one emulator cannot run two tests at once without each acting on the
 other's screen - and the refusal names the run already going so you can go and
 watch it.

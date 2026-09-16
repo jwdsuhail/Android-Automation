@@ -118,7 +118,6 @@ export function CaseDetail({
         <div className="mt-1">
           <Detail label="Actions" value={String(item.max_actions)} />
           <Detail label="Waits" value={String(item.max_waits)} />
-          <Detail label="Wall clock" value={`${item.wall_clock_s}s`} />
           <Detail
             label="Oracle timeout"
             numeric={item.verify_timeout_s !== null}

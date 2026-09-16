@@ -77,7 +77,7 @@ def target(turn: dict[str, object]) -> str:
         where = region(grid.get(start))
         if second is not None:
             where = f"{where} -> {region(grid.get(end))}"
-        detail = f" {span} of 1000 [{where}], px {point(pixels.get(start))}"
+        detail = f" {span} of {COORD_SCALE} [{where}], px {point(pixels.get(start))}"
         if second is not None:
             detail += f" -> {point(pixels.get(end))}"
         if action == "long_press":

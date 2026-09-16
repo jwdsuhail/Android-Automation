@@ -289,7 +289,6 @@ export default function App() {
             <LiveRun
               runId={watching}
               maxActions={watched?.max_actions ?? 20}
-              wallClockS={watched?.wall_clock_s ?? 240}
               onOpenRun={openRun}
               onBack={() => setWatching(null)}
             />

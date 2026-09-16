@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +12,16 @@ from android_runner.cases import Case
 from android_runner.client import ModelClient
 from android_runner.config import Settings, load_env_file
 from android_runner.device import AdbDevice
-from android_runner.format import action_said, target
-from android_runner.runner import Budget, run
+from android_runner.format import action_said, turn_line
+from android_runner.runner import (
+    DEFAULT_MAX_ACTIONS,
+    DEFAULT_MAX_WAITS,
+    UNMEASURED,
+    Budget,
+    new_run_id,
+    run,
+    write_json,
+)
 
 
 def _print_turn(turn: dict[str, object]) -> None:
@@ -28,10 +35,7 @@ def _print_turn(turn: dict[str, object]) -> None:
     expectation = turn.get("expectation")
     if expectation:
         print(f"     expect: {expectation}", file=sys.stderr, flush=True)
-    action = turn.get("action", "?")
-    moved = turn.get("moved")
-    suffix = "" if moved is None else (" moved" if moved else " no-change")
-    print(f"     -> {action}{target(turn)}{suffix}", file=sys.stderr, flush=True)
+    print(f"     -> {turn_line(turn)}", file=sys.stderr, flush=True)
     held = turn.get("hold")
     if isinstance(held, dict):
         for hold_note in held.get("notes") or ():
@@ -83,11 +87,6 @@ def _oracle_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     return payload
 
 
-# Neither says anything about the agent, so neither may exit like a failed
-# task: one is a harness that broke, the other a judge that would not answer.
-_UNMEASURED = frozenset({"infrastructure", "oracle"})
-
-
 def _exit_code(result: dict[str, Any]) -> int:
     """0 verified, 1 the agent did not get there, 2 nothing was measured.
 
@@ -96,7 +95,10 @@ def _exit_code(result: dict[str, Any]) -> int:
     """
     if result.get("verified"):
         return 0
-    return 2 if result.get("error_class") in _UNMEASURED else 1
+    # Neither answer says anything about the agent, so neither may exit like a
+    # failed task: one is a harness that broke, the other a judge that would
+    # not answer. The set is `runner`'s, so it cannot drift from `error_class`.
+    return 2 if result.get("error_class") in UNMEASURED else 1
 
 
 def _resolve_case(args: argparse.Namespace) -> Case:
@@ -125,9 +127,12 @@ def _resolve_case(args: argparse.Namespace) -> Case:
         name=stored.name if stored else "ad-hoc",
         instruction=args.instruction or (stored.instruction if stored else ""),
         success=args.success if args.success is not None else (stored.success if stored else None),
-        max_actions=int(pick(args.max_actions, stored.max_actions if stored else None, 20)),
-        max_waits=int(pick(args.max_waits, stored.max_waits if stored else None, 12)),
-        wall_clock_s=float(pick(args.wall_clock_s, stored.wall_clock_s if stored else None, 240.0)),
+        max_actions=int(
+            pick(args.max_actions, stored.max_actions if stored else None, DEFAULT_MAX_ACTIONS)
+        ),
+        max_waits=int(
+            pick(args.max_waits, stored.max_waits if stored else None, DEFAULT_MAX_WAITS)
+        ),
         verify_timeout_s=(
             args.verify_timeout_s
             if args.verify_timeout_s is not None
@@ -168,7 +173,6 @@ def main(argv: list[str] | None = None) -> int:
     # supply what the command line did not.
     parser.add_argument("--max-actions", type=int, default=None)
     parser.add_argument("--max-waits", type=int, default=None)
-    parser.add_argument("--wall-clock-s", type=float, default=None)
     parser.add_argument(
         "--verify-timeout-s",
         type=float,
@@ -206,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     if settings.app_package:
         print(f"closing {settings.app_package} before the run", flush=True)
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = new_run_id()
     out_dir = args.out or Path("runs") / stamp
 
     # The case as it was when run, written before the first turn so that a run
@@ -214,9 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     # case must not rewrite the history of what this run actually executed.
     if args.case is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "case.json").write_text(
-            json.dumps(case.as_dict(), indent=2) + "\n", encoding="utf-8"
-        )
+        write_json(out_dir / "case.json", case.as_dict())
 
     result = run(
         case.instruction,
@@ -228,7 +230,6 @@ def main(argv: list[str] | None = None) -> int:
         budget=Budget(
             max_actions=case.max_actions,
             max_waits=case.max_waits,
-            wall_clock_s=case.wall_clock_s,
             verify_timeout_s=case.verify_timeout_s,
             warmup=case.warmup,
         ),

@@ -5,7 +5,6 @@
   "success": "The newly created project is successfully sent to Test 11 in the chat",
   "max_actions": 25,
   "max_waits": 12,
-  "wall_clock_s": 240.0,
   "verify_timeout_s": null,
   "warmup": true,
   "created_at": "2026-09-15T20:55:29.096259Z",

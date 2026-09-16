@@ -9,7 +9,6 @@ const EMPTY: CaseDraft = {
   success: "",
   max_actions: 20,
   max_waits: 12,
-  wall_clock_s: 240,
   verify_timeout_s: null,
   warmup: true,
 };
@@ -31,7 +30,6 @@ function validate(draft: CaseDraft): Errors {
   }
   if (!(draft.max_actions >= 1)) errors.max_actions = "At least 1.";
   if (!(draft.max_waits >= 1)) errors.max_waits = "At least 1.";
-  if (!(draft.wall_clock_s > 0)) errors.wall_clock_s = "Greater than 0.";
   if (draft.verify_timeout_s !== null && !(draft.verify_timeout_s > 0)) {
     errors.verify_timeout_s = "Greater than 0, or blank.";
   }
@@ -59,7 +57,6 @@ export function CaseForm({
           success: existing.success ?? "",
           max_actions: existing.max_actions,
           max_waits: existing.max_waits,
-          wall_clock_s: existing.wall_clock_s,
           verify_timeout_s: existing.verify_timeout_s,
           warmup: existing.warmup,
         }
@@ -169,7 +166,7 @@ export function CaseForm({
             Whichever runs out first ends the run. Waits are counted separately
             from actions so that a slow screen cannot spend the whole budget.
           </p>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <NumberField
               id="max_actions"
               label="Actions"
@@ -187,16 +184,6 @@ export function CaseForm({
               onChange={(next) => set("max_waits", Number(next))}
               invalid={Boolean(shown("max_waits"))}
               error={shown("max_waits")}
-            />
-            <NumberField
-              id="wall_clock_s"
-              label="Wall clock"
-              unit="s"
-              min={1}
-              value={draft.wall_clock_s}
-              onChange={(next) => set("wall_clock_s", Number(next))}
-              invalid={Boolean(shown("wall_clock_s"))}
-              error={shown("wall_clock_s")}
             />
             <NumberField
               id="verify_timeout_s"

@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from android_runner.runner import DEFAULT_MAX_ACTIONS, DEFAULT_MAX_WAITS, write_json
+
 # A case id is also a filename, so it is restricted to what is safe in one on
 # every platform, and checked rather than sanitised when it arrives from HTTP.
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -60,11 +62,13 @@ class Case:
     name: str
     instruction: str
     success: str | None = None
-    max_actions: int = 20
-    max_waits: int = 12
-    wall_clock_s: float = 240.0
+    max_actions: int = DEFAULT_MAX_ACTIONS
+    max_waits: int = DEFAULT_MAX_WAITS
     # None gives the oracle the same ceiling as the actor, matching Budget.
     verify_timeout_s: float | None = None
+    # True here, False on `Budget`, and the difference is deliberate: the
+    # library loop stays a pure function of its replies, while a saved case is
+    # something a person runs and should not pay the first-call weight load.
     warmup: bool = True
     created_at: str = ""
     updated_at: str = ""
@@ -97,8 +101,6 @@ class Case:
             raise ValueError("max_actions must be at least 1")
         if self.max_waits < 1:
             raise ValueError("max_waits must be at least 1")
-        if self.wall_clock_s <= 0:
-            raise ValueError("wall_clock_s must be greater than 0")
         if self.verify_timeout_s is not None and self.verify_timeout_s <= 0:
             raise ValueError("verify_timeout_s must be greater than 0")
 
@@ -129,9 +131,8 @@ class Case:
             name=name,
             instruction=str(payload.get("instruction") or "").strip(),
             success=None if success is None else str(success),
-            max_actions=_int(payload, "max_actions", 20),
-            max_waits=_int(payload, "max_waits", 12),
-            wall_clock_s=_float(payload, "wall_clock_s", 240.0),
+            max_actions=_int(payload, "max_actions", DEFAULT_MAX_ACTIONS),
+            max_waits=_int(payload, "max_waits", DEFAULT_MAX_WAITS),
             verify_timeout_s=None if verify is None else _float(payload, "verify_timeout_s", 0.0),
             warmup=bool(payload.get("warmup", True)),
             created_at=str(payload.get("created_at") or "") or _now(),
@@ -259,7 +260,7 @@ class CaseStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         path = self._path(stamped.id)
         temp = path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(stamped.as_dict(), indent=2) + "\n", encoding="utf-8")
+        write_json(temp, stamped.as_dict())
         os.replace(temp, path)
         return stamped
 

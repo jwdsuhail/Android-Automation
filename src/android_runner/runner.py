@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -31,16 +32,27 @@ _INFRASTRUCTURE_STATUSES = frozenset({"device_error", "model_error", "oracle_err
 # broken server, which is the opposite of the split this exists to draw.
 _ORACLE_STATUSES = frozenset({"oracle_inconclusive"})
 
+# The three answers `error_class` can give, named once. `INFRASTRUCTURE` comes
+# from `verification` rather than being spelled again here, and the console
+# reads all three from this module rather than re-declaring the strings: a
+# vocabulary that decides how a run is filed should have one definition.
+ORACLE = "oracle"
+AGENT = "agent"
+
+# Neither says anything about the agent. A caller deciding whether a run
+# measured anything wants this set, not the individual strings.
+UNMEASURED = frozenset({INFRASTRUCTURE, ORACLE})
+
 
 def error_class(status: str) -> str | None:
     """"infrastructure", "oracle", "agent", or None for a verified pass."""
     if status == "verified":
         return None
     if status in _INFRASTRUCTURE_STATUSES:
-        return "infrastructure"
+        return INFRASTRUCTURE
     if status in _ORACLE_STATUSES:
-        return "oracle"
-    return "agent"
+        return ORACLE
+    return AGENT
 
 
 class DeviceLike(Protocol):
@@ -56,11 +68,28 @@ class ClientLike(Protocol):
     ) -> Completion: ...
 
 
+# A run directory is named for the moment it started: UTC, to the second. The
+# terminal and the console both create runs and the console parses the name
+# back into a time, so the format is written down once for all three.
+RUN_ID_STAMP = "%Y%m%dT%H%M%SZ"
+
+
+def new_run_id() -> str:
+    """The id of a fresh run directory."""
+    return datetime.now(timezone.utc).strftime(RUN_ID_STAMP)
+
+
+# The bounds a run is given when nobody names one. `Case` defaults to these too
+# rather than repeating the numbers, so raising a budget is a one-line change
+# and the terminal and the console cannot start from different ceilings.
+DEFAULT_MAX_ACTIONS = 20
+DEFAULT_MAX_WAITS = 12
+
+
 @dataclass(frozen=True)
 class Budget:
-    max_actions: int = 20
-    max_waits: int = 12
-    wall_clock_s: float = 240.0
+    max_actions: int = DEFAULT_MAX_ACTIONS
+    max_waits: int = DEFAULT_MAX_WAITS
     # None gives the oracle the same ceiling as the actor. Starving the grader
     # is what made a slow server indistinguishable from a failed task.
     verify_timeout_s: float | None = None
@@ -72,7 +101,12 @@ class Budget:
     warmup: bool = False
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Every JSON artifact this project writes, spelled one way.
+
+    Indented and newline-terminated because these files are read by people and
+    diffed by git as often as they are parsed.
+    """
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -93,7 +127,6 @@ def run(
     """Run until verified, bounded failure, or an unverified actor claim."""
     out_dir.mkdir(parents=True, exist_ok=True)
     started = clock()
-    deadline = started + budget.wall_clock_s
     turns: list[dict[str, Any]] = []
     checks: list[dict[str, Any]] = []
     history: list[tuple[bytes, str]] = []
@@ -113,9 +146,6 @@ def run(
     last_settle: Settled | None = None
     emit = on_turn or (lambda _turn: None)
     emit_check = on_check or (lambda _check: None)
-
-    def remaining() -> float:
-        return max(0.0, deadline - clock())
 
     def finish(status: str, detail: str) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -137,7 +167,7 @@ def run(
             result["warmup_error"] = warmup_error
         if closed_app:
             result["closed_app"] = closed_app
-        _write_json(out_dir / "run.json", result)
+        write_json(out_dir / "run.json", result)
         return result
 
     def capture(name: str) -> tuple[bytes, int, int]:
@@ -173,26 +203,18 @@ def run(
         return outcome.png, size[0], size[1]
 
     def check(png: bytes) -> Check:
-        # The verifier asks two questions and may retry each one. Dividing by
-        # the worst case keeps the whole pair inside the one wall-clock
-        # ceiling; capping it at the actor's own ceiling stops the grader from
-        # being the only component on a short timeout.
-        attempts = max(1, budget.verify_attempts)
-        ceiling = budget.verify_timeout_s or settings.model_timeout_s
-        per_call = min(ceiling, remaining() / (2 * attempts))
-        if per_call <= 0:
-            outcome = Check(
-                None, "run wall clock exhausted", "", kind=INFRASTRUCTURE
-            )
-        else:
-            outcome = verify(
-                client,  # type: ignore[arg-type] - protocol-compatible test clients
-                png,
-                success or "",
-                settings.model_history_n,
-                per_call,
-                attempts,
-            )
+        # Every call gets the actor's own ceiling. There is no run-wide total
+        # left to divide between the two questions and their retries, and
+        # starving the grader is what made a slow server indistinguishable
+        # from a failed task.
+        outcome = verify(
+            client,  # type: ignore[arg-type] - protocol-compatible test clients
+            png,
+            success or "",
+            settings.model_history_n,
+            budget.verify_timeout_s or settings.model_timeout_s,
+            max(1, budget.verify_attempts),
+        )
         record = outcome.as_dict()
         checks.append(record)
         emit_check(record)
@@ -257,7 +279,7 @@ def run(
         try:
             warm = client.complete(
                 qwen_vl.warmup_messages(current_png),
-                timeout_s=min(settings.model_timeout_s, remaining()),
+                timeout_s=settings.model_timeout_s,
             )
             warmup_error = warm.error
         except Exception as exc:  # noqa: BLE001 - a warm-up must not end a run
@@ -268,14 +290,9 @@ def run(
         initial = check(current_png)
         if initial.holds is True:
             return finish("verified", "success condition held before any action")
-        if remaining() <= 0:
-            return finish("timed_out", "wall clock exhausted during entry check")
 
     index = 0
     while actions < budget.max_actions and waits < budget.max_waits:
-        if remaining() <= 0:
-            return finish("timed_out", "wall clock exhausted")
-
         screen_path = out_dir / f"turn_{index:03d}.png"
         screen_path.write_bytes(current_png)
         messages = qwen_vl.build_messages(
@@ -287,7 +304,7 @@ def run(
             thinking=settings.model_thinking,
             reflection=settings.model_reflection,
         )
-        completion = client.complete(messages, timeout_s=remaining())
+        completion = client.complete(messages, timeout_s=settings.model_timeout_s)
         raw_path = out_dir / f"turn_{index:03d}.raw.txt"
         raw_path.write_text(completion.raw, encoding="utf-8")
         record: dict[str, Any] = {
@@ -302,7 +319,7 @@ def run(
         if completion.error:
             record["error"] = completion.error
             turns.append(record)
-            _write_json(out_dir / f"turn_{index:03d}.json", record)
+            write_json(out_dir / f"turn_{index:03d}.json", record)
             emit(record)
             return finish("model_error", completion.error)
 
@@ -312,7 +329,7 @@ def run(
         except ValueError as exc:
             record["error"] = f"{exc}{truncation_note(completion)}"
             turns.append(record)
-            _write_json(out_dir / f"turn_{index:03d}.json", record)
+            write_json(out_dir / f"turn_{index:03d}.json", record)
             emit(record)
             return finish("parse_error", record["error"])
 
@@ -351,7 +368,7 @@ def run(
             except ValueError as exc:
                 record["error"] = f"{exc}{truncation_note(completion)}"
                 turns.append(record)
-                _write_json(out_dir / f"turn_{index:03d}.json", record)
+                write_json(out_dir / f"turn_{index:03d}.json", record)
                 emit(record)
                 return finish("parse_error", record["error"])
             resolved = hold.resolve(
@@ -381,7 +398,7 @@ def run(
         if parsed.action == "terminate":
             record["actor_status"] = str(parsed.arguments.get("status", "success"))
             turns.append(record)
-            _write_json(out_dir / f"turn_{index:03d}.json", record)
+            write_json(out_dir / f"turn_{index:03d}.json", record)
             emit(record)
 
             if not success:
@@ -430,7 +447,7 @@ def run(
         except Exception as exc:  # noqa: BLE001
             record["error"] = f"{type(exc).__name__}: {exc}"
             turns.append(record)
-            _write_json(out_dir / f"turn_{index:03d}.json", record)
+            write_json(out_dir / f"turn_{index:03d}.json", record)
             emit(record)
             return finish("device_error", record["error"])
 
@@ -442,7 +459,7 @@ def run(
             record["settle_ms"] = last_settle.ms
             record["settled"] = last_settle.settled
         turns.append(record)
-        _write_json(out_dir / f"turn_{index:03d}.json", record)
+        write_json(out_dir / f"turn_{index:03d}.json", record)
         emit(record)
 
         history.append((current_png, qwen_vl.replay(completion.raw)))
@@ -469,9 +486,6 @@ def run(
                         return finish("stuck", noting(stuck.detail, outcome))
                 return finish("stuck", stuck.detail)
         index += 1
-
-    if remaining() <= 0:
-        return finish("timed_out", "wall clock exhausted")
 
     exhausted = "action or wait budget exhausted"
     if success:

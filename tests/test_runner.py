@@ -685,6 +685,8 @@ def test_error_class_separates_a_dead_harness_from_a_failed_task() -> None:
     # A judge that answered and could not be read is a third thing. Filing it
     # under infrastructure sent you to restart a server that was working.
     assert error_class("oracle_inconclusive") == "oracle"
+    # `timed_out` is no longer produced - the wall-clock deadline is gone -
+    # but runs written before that are still on disk and still get read.
     for status in (
         "parse_error",
         "stuck",

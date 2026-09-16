@@ -79,7 +79,6 @@ def test_an_update_preserves_when_the_case_was_created(tmp_path: Path) -> None:
     [
         ({"name": "x", "instruction": ""}, "instruction must not be empty"),
         ({"name": "x", "instruction": "y", "max_actions": 0}, "max_actions must be at least 1"),
-        ({"name": "x", "instruction": "y", "wall_clock_s": 0}, "wall_clock_s must be greater"),
         ({"name": "!!!", "instruction": "y"}, "letters or digits"),
     ],
 )
@@ -200,7 +199,7 @@ def test_the_stream_replays_a_finished_run_then_ends(tmp_path: Path) -> None:
     assert events[0][1]["line"].startswith("click 228,640")
     assert events[-1][1]["outcome"] == "pass"
     # A watcher that arrives late has no other way to know when the run began,
-    # and a wall-clock meter counting from page load would be wrong.
+    # and an elapsed time counting from page load would be wrong.
     assert events[2][1]["started_at"] == "2026-09-14T12:14:27Z"
 
 

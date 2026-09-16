@@ -59,7 +59,6 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "success": None,
         "max_actions": None,
         "max_waits": None,
-        "wall_clock_s": None,
         "verify_timeout_s": None,
         "no_warmup": False,
     }
@@ -88,7 +87,9 @@ def test_a_case_file_supplies_every_argument(tmp_path: Path) -> None:
     assert case.instruction == "Open the Test 14 chat"
     assert case.max_actions == 70
     assert case.max_waits == 20
-    assert case.wall_clock_s == 2400
+    # The file still carries wall_clock_s. Nothing reads it, and loading it is
+    # not an error - that is the whole of the migration.
+    assert "wall_clock_s" not in case.as_dict()
 
 
 def test_an_explicit_flag_beats_the_stored_case(tmp_path: Path) -> None:
@@ -108,7 +109,6 @@ def test_without_a_case_the_usual_defaults_apply() -> None:
     case = _resolve_case(_args(instruction="Explore Settings"))
     assert case.max_actions == 20
     assert case.max_waits == 12
-    assert case.wall_clock_s == 240
     assert case.success is None
 
 

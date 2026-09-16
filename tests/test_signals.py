@@ -13,7 +13,6 @@ from android_runner.signals import (
     action_key,
     detect_stuck,
     screen_change,
-    screen_delta,
     wait_until_settled,
 )
 
@@ -74,7 +73,6 @@ def test_full_frame_change_moves_both_metrics() -> None:
     assert change.mean == 1.0
     assert change.tile_max == 1.0
     assert change.moved is True
-    assert screen_delta(before, after) == change.mean
 
 
 def test_localized_tile_is_moved_while_global_mean_stays_small() -> None:

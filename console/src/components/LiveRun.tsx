@@ -1,28 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "@phosphor-icons/react";
 import { fileUrl, streamRun, type Outcome, type Turn } from "../api";
+import { duration } from "../format";
 import { StatusBadge } from "./StatusBadge";
 
 /**
  * How much of a budget a run has spent.
  *
- * Actions and the clock are the two numbers that decide whether a run dies,
- * and until now they were invisible until it was over. A bar is the whole
- * point: the number alone does not say how close to the edge it is.
+ * The action count is what decides whether a run dies, and until now it was
+ * invisible until it was over. A bar is the whole point: the number alone does
+ * not say how close to the edge it is.
  */
 function Meter({
   label,
   used,
   limit,
-  format,
 }: {
   label: string;
   used: number;
   limit: number;
-  format?: (value: number) => string;
 }) {
   const fraction = limit > 0 ? Math.min(used / limit, 1) : 0;
-  const show = format ?? String;
   // Amber before the run dies, not after. `--infra` is already the colour of
   // "something is wrong but nothing has failed yet".
   const colour = fraction >= 0.9 ? "var(--infra)" : "var(--accent)";
@@ -31,7 +29,7 @@ function Meter({
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-[11px] text-faint">{label}</span>
         <span className="nums text-[11px] text-dim">
-          {show(used)} / {show(limit)}
+          {used} / {limit}
         </span>
       </div>
       <div
@@ -82,13 +80,11 @@ function TurnRow({ runId, turn }: { runId: string; turn: Turn }) {
 export function LiveRun({
   runId,
   maxActions,
-  wallClockS,
   onOpenRun,
   onBack,
 }: {
   runId: string;
   maxActions: number;
-  wallClockS: number;
   onOpenRun: (runId: string) => void;
   onBack: () => void;
 }) {
@@ -99,9 +95,7 @@ export function LiveRun({
   const [elapsed, setElapsed] = useState(0);
   const [ended, setEnded] = useState<string | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
-  const [budgets, setBudgets] = useState<{ actions: number; clock: number } | null>(
-    null,
-  );
+  const [budgets, setBudgets] = useState<{ actions: number } | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLUListElement>(null);
   // Follow the run, unless someone has scrolled back to read an earlier turn.
@@ -151,10 +145,7 @@ export function LiveRun({
       .then((response) => (response.ok ? response.json() : null))
       .then((snapshot) => {
         if (live && snapshot) {
-          setBudgets({
-            actions: Number(snapshot.max_actions),
-            clock: Number(snapshot.wall_clock_s),
-          });
+          setBudgets({ actions: Number(snapshot.max_actions) });
         }
       })
       .catch(() => undefined);
@@ -163,10 +154,11 @@ export function LiveRun({
     };
   }, [runId]);
 
-  // The wall clock is spending whether or not a turn has landed, so it is
-  // counted here rather than waiting on the next event to move. It counts from
-  // when the run started, not from when this page opened, so reattaching to a
-  // run already three minutes in shows three minutes.
+  // Elapsed time is not a budget any more - nothing ends a run for taking too
+  // long - but a case can now run for as long as it needs, so how long it has
+  // been going is the one thing a reader cannot infer from the turns. It counts
+  // from when the run started, not from when this page opened, so reattaching
+  // to a run already three minutes in shows three minutes.
   useEffect(() => {
     if (ended !== null) return;
     const origin = startedAt ?? Date.now();
@@ -210,14 +202,12 @@ export function LiveRun({
           {!live && <StatusBadge outcome={outcome} status={status} />}
         </div>
 
-        <div className="mt-3 flex gap-5">
+        <div className="mt-3 flex items-baseline gap-5">
           <Meter label="Actions" used={actions} limit={budgets?.actions ?? maxActions} />
-          <Meter
-            label="Wall clock"
-            used={Math.min(elapsed, budgets?.clock ?? wallClockS)}
-            limit={budgets?.clock ?? wallClockS}
-            format={(value) => `${Math.round(value)}s`}
-          />
+          <div className="flex shrink-0 items-baseline gap-2">
+            <span className="text-[11px] text-faint">Elapsed</span>
+            <span className="nums text-[11px] text-dim">{duration(elapsed)}</span>
+          </div>
         </div>
       </header>
 
@@ -235,11 +225,11 @@ export function LiveRun({
         {turns.map((turn) => (
           <TurnRow key={turn.index} runId={runId} turn={turn} />
         ))}
-        {turns.length === 0 && (
+        {/* Nothing while the run is still live: the footer already says turns
+            appear as they are written, and the header is counting. */}
+        {turns.length === 0 && !live && (
           <li className="px-5 py-6 text-[12px] leading-relaxed text-dim">
-            {live
-              ? "Waiting for the first turn. A cold model pays for weight load and graph capture before it answers."
-              : "This run wrote no turns. Its console.log holds the reason."}
+            This run wrote no turns. Its console.log holds the reason.
           </li>
         )}
         <div ref={bottom} />
