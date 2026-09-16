@@ -1,7 +1,7 @@
 {
   "id": "creating-a-project-and-sending-it-to-an-1-1-chat",
   "name": "Creating a project and sending it to an 1-1 Chat",
-  "instruction": "Open FYI, navigate to the project section click on the plus icon to create a project. Create a new project, click on the plus icon and click on media gallery add an image and name the project after naming the project i want you to add test 14 as an editor and navigate to the chat section search for test 11 and send him the project which you just created",
+  "instruction": "Open FYI, navigate to the project section click on the plus icon to create a project. Create a new project, click on the plus icon and click on media gallery add an image and name the project after naming the project i want you to add test 14 as an editor, save the project and click on the back arrow, then navigate to the chat section and search for test 11 and send him the project which you just created",
   "success": "The newly created project is successfully sent to Test 11 in the chat",
   "max_actions": 25,
   "max_waits": 12,
@@ -9,5 +9,5 @@
   "verify_timeout_s": null,
   "warmup": true,
   "created_at": "2026-09-15T20:55:29.096259Z",
-  "updated_at": "2026-09-15T20:55:29.096307Z"
+  "updated_at": "2026-09-16T05:20:01.061430Z"
 }

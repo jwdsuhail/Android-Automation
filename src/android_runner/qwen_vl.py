@@ -53,7 +53,7 @@ A control that says hold, press and hold, or hold to confirm needs long_press, n
 
 For swipe, coordinate is where the finger starts and coordinate2 is where it ends. To scroll a list down the screen, start low and end high.
 
-If the screen is busy - loading, generating, uploading, compressing, saving - wait instead of tapping. The signs are a progress bar or a spinner, a percentage, a greyed-out button, or text such as Generating, Uploading, or Processing. Set time to the seconds you expect it to need: about 3 for a screen that is loading, 10 or more for an upload or an image being generated. After a wait you are told what the screen did. If an indicator is still showing, wait again with a longer time. If the indicator is gone and nothing else changed, the operation has finished or failed, so act instead of waiting again.
+If the screen is busy - loading, generating, uploading, compressing, saving - wait instead of tapping. A screen that is only part drawn is busy too: if the app has just opened, or you have just moved to another screen, and the navigation bar or the list or the buttons are still missing, wait rather than act on the part you can see. The signs are a progress bar or a spinner, a percentage, a greyed-out button, or text such as Generating, Uploading, or Processing. Set time to the seconds you expect it to need: about 3 for a screen that is loading, 10 or more for an upload or an image being generated. After a wait you are told what the screen did. If an indicator is still showing, wait again with a longer time. If the indicator is gone and nothing else changed, the operation has finished or failed, so act instead of waiting again.
 
 Do not terminate with status success unless the requested task is complete on the screen in front of you.
 """.strip()
@@ -92,6 +92,39 @@ _EXPECT_LINE = (
     "Expect: Say what the screen must show after the action you choose now.\n"
 )
 
+# The two things a grader shares with an actor: the envelope it answers in, and
+# the one action it is allowed to name. Anchored in _assert_derived so an edit
+# to SYSTEM_PROMPT that renames either is caught rather than quietly leaving
+# the oracle asking for a tool call in a spelling the parser no longer reads.
+_TOOL_CALL_BLOCK = (
+    "<tool_call>\n"
+    '{"name": "mobile_use", "arguments": <args-json-object>}\n'
+    "</tool_call>"
+)
+_TERMINATE_ACTION = '{"action": "terminate", "status": "success|fail"}'
+
+# The oracle is not the actor, and it must not run under the actor's prompt.
+# That prompt ends "Do not terminate with status success unless the requested
+# task is complete on the screen in front of you", which directly contradicts
+# any question that asks the judge to answer success when the task is *not*
+# complete - and the system prompt wins. That is the mechanism behind every
+# (fail, fail) pair: a correct verdict, nullified by its own negation. So this
+# one carries no action space to choose from, no advice about opening apps, no
+# swipe rules and no busy-screen rules. None of them belong to something that
+# only looks and answers.
+ORACLE_SYSTEM_PROMPT = f"""You are grading one screenshot of a mobile app. You do not control the device and you must not act on it.
+
+Answer only the question you are asked about the screen in front of you. Return an Action line, then a json object within <tool_call> tags:
+
+Action: One short sentence naming what on the screen decides your answer.
+{_TOOL_CALL_BLOCK}
+
+The only argument object you may return is:
+{_TERMINATE_ACTION}
+
+Use status success when the answer to the question is yes, and status fail when it is no. Answer the question exactly as it is written, including when it asks whether the screen shows something other than what was described. Judge only what this screenshot shows: not what the app has probably done, not what an earlier screen showed, and not whether any larger task is finished.
+""".strip()
+
 NO_THINK_SYSTEM_PROMPT = (
     SYSTEM_PROMPT.replace(_THOUGHT_REQUEST, _NO_THINK_REQUEST)
     .replace(_THOUGHT_LINE, "")
@@ -103,8 +136,44 @@ NO_THINK_SYSTEM_PROMPT = (
 )
 
 
+def system_prompt(
+    thinking: bool, reflection: bool = False, oracle: bool = False
+) -> str:
+    """Return the actor prompt, or the grader's own.
+
+    Thinking and reflection are independent: reflection is two short labelled
+    lines, not a reasoning block. `oracle` is not a variant of the actor prompt
+    and ignores both - a grader that inherits "do not terminate with status
+    success unless the task is complete" cannot answer a question about the
+    task *not* being complete.
+    """
+    if oracle:
+        return ORACLE_SYSTEM_PROMPT
+    prompt = SYSTEM_PROMPT if thinking else NO_THINK_SYSTEM_PROMPT
+    if not reflection:
+        return prompt
+    if thinking:
+        return prompt.replace(
+            _THOUGHT_REQUEST,
+            "return a Thought line, a Check line, an Expect line, an Action "
+            "line, then a json object",
+        ).replace(_THOUGHT_LINE, _THOUGHT_LINE + _CHECK_LINE + _EXPECT_LINE)
+    return (
+        prompt.replace(
+            _NO_THINK_REQUEST,
+            "return a Check line, an Expect line, an Action line, then a json object",
+        )
+        .replace(_ACTION_LINE_TEXT, _CHECK_LINE + _EXPECT_LINE + _ACTION_LINE_TEXT)
+        .replace(_GO_STRAIGHT_ACTION, "Go straight to the Check line.")
+    )
+
+
 def _assert_derived() -> None:
-    """Both anchors must still match, or the no-think prompt silently is not one."""
+    """Every prompt built by replacement, checked against what it replaces.
+
+    Runs at import, after `system_prompt`, so the reflection prompts can be
+    built and inspected rather than only their ingredients.
+    """
     for anchor in (_THOUGHT_REQUEST, _THOUGHT_LINE, "</tool_call>\n"):
         if anchor not in SYSTEM_PROMPT:
             raise AssertionError(
@@ -123,35 +192,31 @@ def _assert_derived() -> None:
                 raise AssertionError(
                     f"a prompt no longer states the hold duration: {anchor[:40]!r}"
                 )
+    # The reflection lines are the point of the reflection prompt, and nothing
+    # else asserted they arrived in it. An edit that renamed _ACTION_LINE_TEXT
+    # would have dropped both without failing anything.
+    for thinking in (True, False):
+        prompt = system_prompt(thinking, reflection=True)
+        for anchor in (_CHECK_LINE, _EXPECT_LINE):
+            if anchor not in prompt:
+                raise AssertionError(
+                    "the reflection prompt lost a reflection line: "
+                    f"{anchor[:40]!r}"
+                )
+    # The grader shares two things with the actor and must not share a third.
+    for anchor in (_TOOL_CALL_BLOCK, _TERMINATE_ACTION):
+        if anchor not in SYSTEM_PROMPT or anchor not in ORACLE_SYSTEM_PROMPT:
+            raise AssertionError(
+                f"the oracle prompt no longer shares its envelope: {anchor[:40]!r}"
+            )
+    for leaked in ("## Action space", _LONG_PRESS_ACTION, "To open an app"):
+        if leaked in ORACLE_SYSTEM_PROMPT:
+            raise AssertionError(
+                f"the oracle prompt picked up an actor instruction: {leaked[:40]!r}"
+            )
 
 
 _assert_derived()
-
-
-def system_prompt(thinking: bool, reflection: bool = False) -> str:
-    """Return the actor or oracle prompt.
-
-    Thinking and reflection are independent: reflection is three short labelled
-    lines, not a reasoning block. The independent checker always calls this
-    with reflection off.
-    """
-    prompt = SYSTEM_PROMPT if thinking else NO_THINK_SYSTEM_PROMPT
-    if not reflection:
-        return prompt
-    if thinking:
-        return prompt.replace(
-            _THOUGHT_REQUEST,
-            "return a Thought line, a Check line, an Expect line, an Action "
-            "line, then a json object",
-        ).replace(_THOUGHT_LINE, _THOUGHT_LINE + _CHECK_LINE + _EXPECT_LINE)
-    return (
-        prompt.replace(
-            _NO_THINK_REQUEST,
-            "return a Check line, an Expect line, an Action line, then a json object",
-        )
-        .replace(_ACTION_LINE_TEXT, _CHECK_LINE + _EXPECT_LINE + _ACTION_LINE_TEXT)
-        .replace(_GO_STRAIGHT_ACTION, "Go straight to the Check line.")
-    )
 
 
 # `answer` is deliberately absent: device.execute has no branch for it and
@@ -428,18 +493,22 @@ def parse(raw: str, reasoning: str | None = None) -> ParsedAction:
 def replay(raw: str) -> str:
     """What a prior turn contributes to the *next* prompt.
 
-    A later turn needs the previous Expect so it can Check it, plus what was
-    done. Reasoning is the larger half of a reply - measured at 58% - and the
-    Check line is a judgment of the step before that, so both are dropped.
-    The full reply is still written to disk, parsed, and displayed.
+    Everything the model wrote except its reasoning. Check used to be dropped
+    here on the grounds that it judges the step before last, and that is what
+    killed the line: a model shown its own prior turns, none of which carry a
+    Check, writes no Check either. Every run on disk shows the same shape - the
+    line survives turn 0 and is gone by turn 1. One Check-less example is
+    enough.
+
+    Reasoning is still dropped. It is the larger half of a reply, measured at
+    58%, and unlike Check it is not addressed to the next turn. The full reply
+    is written to disk, parsed, and displayed whatever happens here.
     """
     cleaned, _ = extract_reasoning(raw)
-    expect = _EXPECT_LINE_RE.search(cleaned)
-    if expect is not None:
-        return cleaned[expect.start() :].strip()
-    match = _ACTION_LINE_RE.search(cleaned)
-    if match is not None:
-        return cleaned[match.start() :].strip()
+    for pattern in (_CHECK_LINE_RE, _EXPECT_LINE_RE, _ACTION_LINE_RE):
+        match = pattern.search(cleaned)
+        if match is not None:
+            return cleaned[match.start() :].strip()
     thought = _THOUGHT_LINE_RE.search(cleaned)
     return cleaned[thought.end() :].lstrip() if thought else cleaned
 
@@ -510,15 +579,28 @@ def _is_image_message(message: dict[str, Any]) -> bool:
     return isinstance(first, dict) and first.get("type") == "image_url"
 
 
+TRAIL_LABEL = (
+    "Actions you have already taken, oldest first. The screens you took them on"
+    " are no longer shown."
+)
+
+
 def drop_old_images(
     messages: list[dict[str, Any]], history_n: int
 ) -> list[dict[str, Any]]:
-    """Keep every assistant turn; keep only the last history_n images.
+    """Keep only the last history_n images; fold the turns they belonged to.
 
     Dropping a screenshot and its assistant turn together would erase the
-    model's record of what it already tried, which is what makes an agent
-    retry the same failing tap. The action trail is cheap text and stays;
-    only the images, which are not, are capped.
+    model's record of what it already tried, which is what makes an agent retry
+    the same failing tap. That record is cheap text and stays - but it stays as
+    one `user` message summarising the dropped turns, not as the bare
+    `assistant` messages it used to leave behind.
+
+    Leaving them was a real defect, not a tidiness point. A 27-turn run put 24
+    consecutive `assistant` messages into the prompt, each describing a screen
+    that was no longer in it, with no `user` turn anywhere between them: a
+    shape no chat template was trained on, and the reason the model stopped
+    following the format it was asked for.
 
     history_n is a total image count *including* the current screenshot, not a
     number of prior turns.
@@ -527,7 +609,40 @@ def drop_old_images(
         history_n = 1
     image_indices = [i for i, message in enumerate(messages) if _is_image_message(message)]
     drop = set(image_indices[:-history_n])
-    return [message for i, message in enumerate(messages) if i not in drop]
+    if not drop:
+        return list(messages)
+
+    kept: list[dict[str, Any]] = []
+    trail: list[str] = []
+    folded: set[int] = set()
+    insert_at = len(messages)
+    for index, message in enumerate(messages):
+        if index in folded:
+            continue
+        if index in drop:
+            insert_at = min(insert_at, len(kept))
+            # The assistant turn sits directly after the screenshot it was
+            # written about, so it goes wherever that screenshot goes.
+            following = messages[index + 1] if index + 1 < len(messages) else None
+            if following is not None and following.get("role") == "assistant":
+                text = following.get("content")
+                if isinstance(text, str) and text.strip():
+                    trail.append(text.strip())
+                folded.add(index + 1)
+            continue
+        kept.append(message)
+
+    if trail:
+        kept.insert(
+            insert_at,
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": TRAIL_LABEL + "\n\n" + "\n\n".join(trail)}
+                ],
+            },
+        )
+    return kept
 
 
 def build_messages(
@@ -539,9 +654,10 @@ def build_messages(
     *,
     thinking: bool = False,
     reflection: bool = False,
+    oracle: bool = False,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt(thinking, reflection)},
+        {"role": "system", "content": system_prompt(thinking, reflection, oracle)},
         {"role": "user", "content": [{"type": "text", "text": instruction}]},
     ]
     for old_png, assistant_text in history or []:

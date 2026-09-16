@@ -41,6 +41,9 @@ _STAMP = "%Y%m%dT%H%M%SZ"
 PASS = "pass"
 AGENT = "agent"
 INFRASTRUCTURE = "infrastructure"
+# Its own badge, not the wrench. A judge that answered and was unusable is not
+# a broken harness, and filing it as one made the board over-report breakage.
+ORACLE = "oracle"
 INCOMPLETE = "incomplete"
 
 
@@ -124,7 +127,10 @@ def _outcome(status: str, verified: bool, complete: bool) -> str:
         return INCOMPLETE
     if verified:
         return PASS
-    return INFRASTRUCTURE if error_class(status) == INFRASTRUCTURE else AGENT
+    failed = error_class(status)
+    if failed in (INFRASTRUCTURE, ORACLE):
+        return failed
+    return AGENT
 
 
 def _decorate(turn: dict[str, Any]) -> dict[str, Any]:

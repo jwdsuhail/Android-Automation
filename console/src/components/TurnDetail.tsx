@@ -109,6 +109,16 @@ export function TurnDetail({
         {turn.screen_tile_max !== undefined && (
           <Stat label="delta tile max" value={turn.screen_tile_max.toFixed(4)} />
         )}
+        {/* "capped" is the one worth seeing: the screen was still moving when
+            the wait ran out, so this turn's screenshot may be half drawn. */}
+        {turn.settle_ms !== undefined && (
+          <Stat
+            label="settle"
+            value={`${Math.round(turn.settle_ms)} ms${
+              turn.settled === false ? " (capped)" : ""
+            }`}
+          />
+        )}
         {usage.prompt_tokens !== undefined && (
           <Stat
             label="tokens"

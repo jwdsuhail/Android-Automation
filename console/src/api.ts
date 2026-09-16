@@ -1,6 +1,11 @@
 // Mirrors the dataclasses in src/android_runner/console/reader.py.
 
-export type Outcome = "pass" | "agent" | "infrastructure" | "incomplete";
+export type Outcome =
+  | "pass"
+  | "agent"
+  | "infrastructure"
+  | "oracle"
+  | "incomplete";
 
 export interface RunSummary {
   id: string;
@@ -54,6 +59,10 @@ export interface Turn {
   screen_delta?: number;
   screen_tile_max?: number;
   moved?: boolean;
+  // Absent when MODEL_SETTLE_TIMEOUT_S is 0, so `settled: false` always means
+  // the cap ran out rather than that nobody waited.
+  settle_ms?: number;
+  settled?: boolean;
   hold?: Hold;
   error?: string;
   marked_error?: string;

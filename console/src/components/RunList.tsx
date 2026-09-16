@@ -8,6 +8,7 @@ const FILTERS: (Outcome | "all")[] = [
   "pass",
   "agent",
   "infrastructure",
+  "oracle",
   "incomplete",
 ];
 

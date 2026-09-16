@@ -8,12 +8,6 @@ from pathlib import Path
 
 from android_runner import hold
 
-# The app under test. Every case here drives the FYI chat build, so closing it
-# is the runner's job rather than something each instruction has to remember.
-# APP_PACKAGE overrides it; APP_PACKAGE= empty turns the close off entirely,
-# which is what a run against anything else wants.
-DEFAULT_APP_PACKAGE = "com.xuper.chat.app"
-
 
 def load_env_file(path: Path | None = None) -> list[str]:
     """Load unset variables from a simple KEY=VALUE file."""
@@ -70,6 +64,7 @@ class Settings:
     adb_timeout_s: float
     step_sleep_s: float
     long_press_ms: int
+    settle_timeout_s: float
     app_package: str
 
     @classmethod
@@ -132,5 +127,12 @@ class Settings:
             adb_timeout_s=adb_timeout_s,
             step_sleep_s=max(0.0, float(os.environ.get("MODEL_STEP_SLEEP", "1"))),
             long_press_ms=long_press_ms,
-            app_package=os.environ.get("APP_PACKAGE", DEFAULT_APP_PACKAGE).strip(),
+            settle_timeout_s=max(
+                0.0, float(os.environ.get("MODEL_SETTLE_TIMEOUT_S", "3"))
+            ),
+            # No default package. Force-stopping one named app made every run
+            # start on the launcher, which is a cold start the agent then has
+            # to spend a turn on and a screenshot the app has not finished
+            # drawing. Set APP_PACKAGE to opt back into that isolation.
+            app_package=os.environ.get("APP_PACKAGE", "").strip(),
         )

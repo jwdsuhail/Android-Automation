@@ -10,6 +10,7 @@ from android_runner.console.reader import (
     AGENT,
     INCOMPLETE,
     INFRASTRUCTURE,
+    ORACLE,
     PASS,
     RunStore,
 )
@@ -105,7 +106,7 @@ def test_one_unreadable_run_does_not_hide_the_others(tmp_path: Path) -> None:
 
 
 def test_a_dead_server_never_reads_as_a_failed_task(tmp_path: Path) -> None:
-    """The agent/infrastructure split is the whole point of the badge."""
+    """The agent/infrastructure/oracle split is the whole point of the badge."""
     for status in ("device_error", "model_error", "oracle_error", "oracle_inconclusive"):
         complete_run(tmp_path, f"run_{status}", status=status)
     for status in (
@@ -121,8 +122,11 @@ def test_a_dead_server_never_reads_as_a_failed_task(tmp_path: Path) -> None:
 
     outcomes = {s.id: s.outcome for s in RunStore(tmp_path).summaries()}
     assert outcomes["run_verified"] == PASS
-    assert outcomes["run_oracle_inconclusive"] == INFRASTRUCTURE
     assert outcomes["run_device_error"] == INFRASTRUCTURE
+    assert outcomes["run_oracle_error"] == INFRASTRUCTURE
+    # Its own badge. The harness worked; the judge answered and could not be
+    # read, and a wrench next to that sends you to restart a healthy server.
+    assert outcomes["run_oracle_inconclusive"] == ORACLE
     assert outcomes["run_stuck"] == AGENT
     assert outcomes["run_timed_out"] == AGENT
 

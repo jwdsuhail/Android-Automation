@@ -81,15 +81,21 @@ model-run \
 | `1` | The run measured the agent and it did not get there. | `parse_error`, `stuck`, `budget_exhausted`, `timed_out`, `actor_gave_up`, `actor_claimed_success` |
 | `2` | Nothing was measured. The result says nothing about the agent. | `device_error`, `model_error`, `oracle_error`, `oracle_inconclusive`, configuration refusal |
 
-`run.json` carries the same split as `error_class`: `"agent"`, `"infrastructure"`,
-or `null` for a pass. A timed-out oracle is not a failed task, and reporting it
-as one makes every red result unreadable.
+`run.json` carries the same split as `error_class`: `"agent"`,
+`"infrastructure"`, `"oracle"`, or `null` for a pass. A timed-out oracle is not
+a failed task, and reporting it as one makes every red result unreadable.
 
-The two infrastructure statuses that concern the checker are distinct on
-purpose. `oracle_error` means no verdict arrived - the transport failed, and
-the fix is your server. `oracle_inconclusive` means a reply arrived and was
-unusable, most often the same answer to the success condition and its negation,
-and the fix is the judge.
+The two checker statuses are distinct on purpose, and they are not the same
+class. `oracle_error` is `"infrastructure"`: no verdict arrived, the transport
+failed, and the fix is your server. `oracle_inconclusive` is `"oracle"`: a
+reply arrived and was unusable, most often the same answer to the success
+condition and its complement, and the fix is the judge. Filing the second under
+infrastructure sent you to restart a server that was working.
+
+An inconclusive checker no longer overwrites a verdict the run had already
+reached. A run that ended `stuck` or `budget_exhausted` keeps that status and
+records the non-answer in `detail`; only `oracle_error` - nothing measured at
+all - replaces it.
 
 The oracle is retried only when the transport fails. A verdict is never
 retried: asking again until the answer changes is best-of-N, not verification.
@@ -98,34 +104,50 @@ cost.
 
 ### Cold start
 
-Every run force-stops the app under test before it takes the entry screenshot:
-
-```
-adb -s $ADB_DEVICE shell am force-stop com.xuper.chat.app
-```
-
-That package is the default, so no flag or instruction has to ask for it. A run
-that inherits the previous run's half-open dialog is measuring the last test as
-much as this one, and that failure reads as flakiness rather than as leftover
-state.
-
-It is `am force-stop`, not `pm clear`: processes die and the task is dropped,
-storage is untouched, and the account stays signed in. The run records what it
-closed as `closed_app` in `run.json`, and the runner waits `MODEL_STEP_SLEEP`
-afterwards so the entry screenshot catches the launcher rather than the closing
-animation.
-
-Set `APP_PACKAGE` to drive a different app, or to empty to leave the device
-alone:
+Nothing is force-stopped unless you name a package. Set `APP_PACKAGE` and the
+runner closes it before the entry screenshot:
 
 ```bash
 APP_PACKAGE=com.example.other model-run --instruction "..."
-APP_PACKAGE= model-run --instruction "..."
 ```
+
+```
+adb -s $ADB_DEVICE shell am force-stop com.example.other
+```
+
+This used to be on by default with one package hardcoded, and the isolation was
+not worth what it cost. Force-stopping hands the agent the launcher, so turn 0
+goes on finding and tapping the app icon instead of on the task, and the screen
+it is then shown is the app mid-launch - a half-drawn tab with the navigation
+bar still missing. The agent describes what it can see, which reads as
+hallucination in the transcript and is really a screenshot taken too early.
+
+The trade is real in both directions: a run that inherits the previous run's
+half-open dialog is measuring the last test as much as this one. Name the
+package when that matters more than the cold-start turn.
+
+It is `am force-stop`, not `pm clear`: processes die and the task is dropped,
+storage is untouched, and the account stays signed in. The run records what it
+closed as `closed_app` in `run.json`, and a run that closed nothing has no such
+key.
 
 A package that is not installed is not an error. `am force-stop` exits `0`
 whatever name it is given, so a typo here closes nothing and says nothing;
 check the name with `adb shell pm list packages | grep <name>`.
+
+### Settling
+
+Every screenshot the model is shown - the entry shot and each turn's `after` -
+is taken by polling until two consecutive frames are identical, capped by
+`MODEL_SETTLE_TIMEOUT_S` (3s, `0` to turn it off). A screen that is already
+still costs one extra poll; one still animating costs as long as it takes,
+which is the point. A fixed `MODEL_STEP_SLEEP` cannot do this job: it is always
+too short for a cold launch and too long for a tap that landed instantly.
+
+Running out of the cap is a normal exit, not an error. The newest frame is
+still what the model is shown, and the turn record says so with `settled:
+false`, which is the flag to look for when a turn reads as the model
+misdescribing the screen.
 
 ### Warm-up
 
@@ -330,9 +352,18 @@ Action: what it does now.
 ```
 
 The prompt already contains the screen from before the last action (`BEFORE`)
-and the screen after it (`NOW`). Replayed history keeps `Expect` and `Action`
-and drops `Check`. `MODEL_REFLECTION=0` turns the lines off. Reflection
-requires `MODEL_HISTORY_N` of at least 2 so that before/after pair is present.
+and the screen after it (`NOW`). Replayed history keeps all three lines,
+`Check` included. It used to strip `Check`, and the model copies what it is
+shown: across every run on disk the line appeared on turn 0, sometimes turn 1,
+and then never again. If a reply still arrives without one, the next turn's
+prompt says so. `MODEL_REFLECTION=0` turns the lines off. Reflection requires
+`MODEL_HISTORY_N` of at least 2 so that before/after pair is present.
+
+Turns whose screenshots have aged out of `MODEL_HISTORY_N` are not left in the
+prompt as bare assistant messages. They are folded into one labelled user
+message listing the actions taken so far, so the roles keep alternating; a run
+of 18 consecutive assistant turns describing screens that are no longer in the
+prompt is a shape no chat template was trained on.
 
 A localized pixel change on the screenshot is fed back as a note. It is evidence
 that something moved, not proof the action succeeded. No localized change is
@@ -363,6 +394,11 @@ when a run dies before writing any turn at all.
 Verification replies are stored under `checks` in `run.json`. A `long_press`
 turn also carries a `hold` block naming the duration executed, who decided
 it, and every adjustment made on the way - see [Hold time](#hold-time).
+
+Each turn record also carries `settle_ms` and `settled` - how long the wait for
+a still screen took and whether it got one - unless `MODEL_SETTLE_TIMEOUT_S` is
+`0`, in which case both keys are absent rather than reporting `false` on every
+turn.
 
 `turn_NNN.marked.png` is `turn_NNN.png` with the action's target drawn on it: a
 crosshair for a tap or long press, an arrow for a swipe or drag. Actions with no
@@ -404,14 +440,15 @@ The action line - `click 228,640 of 1000 [mid-left], px 246,1551 moved` - is
 rendered by `format.py` on the server and sent as a string, so the browser and
 the terminal cannot drift apart. See [Reading a step](#reading-a-step).
 
-Runs are sorted into four outcomes, each with a glyph and a word as well as a
+Runs are sorted into five outcomes, each with a glyph and a word as well as a
 colour:
 
 | Outcome | Means |
 |---|---|
 | Verified | the oracle confirmed the success condition |
 | Not reached | the agent did not get there: `error_class` is `agent` |
-| Infrastructure | something broke, including `oracle_inconclusive` |
+| Infrastructure | something broke: `error_class` is `infrastructure` |
+| No verdict | the judge answered and could not be read: `oracle_inconclusive` |
 | Unfinished | no `run.json`, reconstructed from the `turn_*.json` files |
 
 The last row matters more than it looks. `run.json` is written only when a run

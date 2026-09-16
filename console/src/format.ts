@@ -1,6 +1,7 @@
 import {
   CheckCircle,
   CircleDashed,
+  Scales,
   Wrench,
   XCircle,
   type Icon,
@@ -8,8 +9,10 @@ import {
 import type { Outcome } from "./api";
 
 // A run either measured the agent or it did not. Reading `oracle_inconclusive`
-// as a failed task is what makes a board of results unreadable, so the four
-// outcomes never collapse into pass and fail.
+// as a failed task is what makes a board of results unreadable, so the five
+// outcomes never collapse into pass and fail. `oracle` is separate from
+// `infrastructure` for the same reason: the harness was fine, the judge was
+// not, and only one of those is fixed by restarting a server.
 export const OUTCOME: Record<
   Outcome,
   { label: string; icon: Icon; color: string }
@@ -17,6 +20,7 @@ export const OUTCOME: Record<
   pass: { label: "Verified", icon: CheckCircle, color: "var(--pass)" },
   agent: { label: "Not reached", icon: XCircle, color: "var(--agent)" },
   infrastructure: { label: "Infrastructure", icon: Wrench, color: "var(--infra)" },
+  oracle: { label: "No verdict", icon: Scales, color: "var(--oracle)" },
   incomplete: { label: "Unfinished", icon: CircleDashed, color: "var(--incomplete)" },
 };
 

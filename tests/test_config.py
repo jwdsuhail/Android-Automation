@@ -56,19 +56,34 @@ def test_a_longer_adb_timeout_permits_a_longer_hold(
     assert Settings.from_env().long_press_ms == 9000
 
 
-def test_the_app_under_test_defaults_to_the_chat_build(
+def test_no_app_is_force_stopped_unless_one_is_named(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A hardcoded package made every run start on the launcher, so the agent
+    spent turn 0 opening the app and was shown the next screen mid-draw. The
+    isolation is still available; it is no longer the default."""
     monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
     monkeypatch.delenv("APP_PACKAGE", raising=False)
-    assert Settings.from_env().app_package == "com.xuper.chat.app"
+    assert Settings.from_env().app_package == ""
 
 
-def test_an_empty_app_package_turns_the_close_off(
+def test_an_app_package_can_still_be_asked_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Not a missing value. Running against another app is a real case, and
-    it must not be reachable only by editing the source."""
     monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
-    monkeypatch.setenv("APP_PACKAGE", "  ")
-    assert Settings.from_env().app_package == ""
+    monkeypatch.setenv("APP_PACKAGE", " com.example.other ")
+    assert Settings.from_env().app_package == "com.example.other"
+
+
+def test_the_settle_cap_defaults_to_three_seconds_and_zero_turns_it_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0 has to mean off rather than a startup refusal: it is the escape hatch
+    for a device where polling costs more than the half-drawn screen does."""
+    monkeypatch.setenv("ADB_DEVICE", "emulator-5554")
+    monkeypatch.delenv("MODEL_SETTLE_TIMEOUT_S", raising=False)
+    assert Settings.from_env().settle_timeout_s == 3
+    monkeypatch.setenv("MODEL_SETTLE_TIMEOUT_S", "0")
+    assert Settings.from_env().settle_timeout_s == 0
+    monkeypatch.setenv("MODEL_SETTLE_TIMEOUT_S", "-4")
+    assert Settings.from_env().settle_timeout_s == 0

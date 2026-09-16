@@ -14,7 +14,37 @@ from android_runner.signals import (
     detect_stuck,
     screen_change,
     screen_delta,
+    wait_until_settled,
 )
+
+
+class Clock:
+    """Time only passes when the code under test asks to wait. A real clock
+    would make the timeout test depend on how fast the machine ran it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def read(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def frames(*images: bytes):
+    """Hands back each frame in turn and then repeats the last one forever."""
+    remaining = list(images)
+    taken: list[bytes] = []
+
+    def shoot() -> bytes:
+        image = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+        taken.append(image)
+        return image
+
+    return shoot, taken
 
 
 def png_gray(size: tuple[int, int], color: int, paint: tuple[int, int, int, int, int] | None = None) -> bytes:
@@ -96,3 +126,55 @@ def test_abab_oscillation_is_stuck() -> None:
 def test_wait_keys_are_ignored_by_stuck_detection() -> None:
     keys = ["wait", "wait", "wait", "click:1,1"]
     assert detect_stuck(keys).stuck is False
+
+
+def test_the_wait_ends_on_the_first_pair_of_matching_frames() -> None:
+    drawing = png_gray(SCREEN_DIFF_SIZE, 0)
+    drawn = png_gray(SCREEN_DIFF_SIZE, 255)
+    shoot, taken = frames(drawing, drawn, drawn)
+    clock = Clock()
+    outcome = wait_until_settled(
+        shoot, timeout_s=3, poll_s=0.25, clock=clock.read, sleep=clock.sleep
+    )
+    assert outcome.settled is True
+    assert outcome.frames == 3
+    assert outcome.png == drawn  # the settled screen, not the one mid-draw
+    assert outcome.ms == 500.0
+    assert len(taken) == 3
+
+
+def test_a_screen_that_never_stops_still_hands_back_the_newest_frame() -> None:
+    """Running out of time is a normal exit. An animation that loops forever
+    must not stall the turn, and the model still needs something to look at."""
+    dark = png_gray(SCREEN_DIFF_SIZE, 0)
+    light = png_gray(SCREEN_DIFF_SIZE, 255)
+    flickering = [dark, light] * 20
+    taken: list[bytes] = []
+
+    def shoot() -> bytes:
+        taken.append(flickering[len(taken) % 2])
+        return taken[-1]
+
+    clock = Clock()
+    outcome = wait_until_settled(
+        shoot, timeout_s=1, poll_s=0.25, clock=clock.read, sleep=clock.sleep
+    )
+    assert outcome.settled is False
+    assert outcome.ms == 1000.0
+    assert outcome.png == taken[-1]
+    assert clock.slept == [0.25] * 4  # polled, not spun
+
+
+def test_a_zero_cap_takes_one_screenshot_and_never_sleeps() -> None:
+    """The escape hatch has to cost exactly what the old single capture did."""
+    image = png_gray(SCREEN_DIFF_SIZE, 0)
+    shoot, taken = frames(image)
+    clock = Clock()
+    outcome = wait_until_settled(
+        shoot, timeout_s=0, clock=clock.read, sleep=clock.sleep
+    )
+    assert outcome.frames == 1
+    assert outcome.ms == 0.0
+    assert outcome.settled is False
+    assert len(taken) == 1
+    assert clock.slept == []

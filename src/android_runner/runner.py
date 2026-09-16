@@ -11,22 +11,36 @@ from typing import Any, Callable, Protocol
 from android_runner import hold, overlay, qwen_vl
 from android_runner.client import Completion, truncation_note
 from android_runner.config import Settings
-from android_runner.signals import action_key, detect_stuck, screen_change
+from android_runner.signals import (
+    Settled,
+    action_key,
+    detect_stuck,
+    screen_change,
+    wait_until_settled,
+)
 from android_runner.verification import INFRASTRUCTURE, Check, verify
 
 # A run either measures the agent or it does not. A dead device, a dead server
 # and a judge that never answered say nothing about whether the task was done,
 # so the caller has to be able to tell them from a task the agent failed.
-_INFRASTRUCTURE_STATUSES = frozenset(
-    {"device_error", "model_error", "oracle_error", "oracle_inconclusive"}
-)
+_INFRASTRUCTURE_STATUSES = frozenset({"device_error", "model_error", "oracle_error"})
+
+# A third thing, and it used to be filed under the first. Here the harness
+# worked and the agent is not what failed: a reply arrived from the judge and
+# was unusable. Calling that "infrastructure" reported a waffling grader as a
+# broken server, which is the opposite of the split this exists to draw.
+_ORACLE_STATUSES = frozenset({"oracle_inconclusive"})
 
 
 def error_class(status: str) -> str | None:
-    """"infrastructure", "agent", or None for a verified pass."""
+    """"infrastructure", "oracle", "agent", or None for a verified pass."""
     if status == "verified":
         return None
-    return "infrastructure" if status in _INFRASTRUCTURE_STATUSES else "agent"
+    if status in _INFRASTRUCTURE_STATUSES:
+        return "infrastructure"
+    if status in _ORACLE_STATUSES:
+        return "oracle"
+    return "agent"
 
 
 class DeviceLike(Protocol):
@@ -96,6 +110,7 @@ def run(
     warmup_ms: float | None = None
     warmup_error: str | None = None
     closed_app: str | None = None
+    last_settle: Settled | None = None
     emit = on_turn or (lambda _turn: None)
     emit_check = on_check or (lambda _check: None)
 
@@ -132,6 +147,31 @@ def run(
             path.write_bytes(png)
         return png, width, height
 
+    def capture_settled(name: str) -> tuple[bytes, int, int]:
+        """Shoot the same file until the screen stops moving.
+
+        Overwriting one filename rather than numbering the frames leaves the
+        artifact set exactly as it was; the frame that survives is the one the
+        model is shown, which is the one worth keeping. A run with the settle
+        loop off records nothing, so `settled: false` never means "off".
+        """
+        nonlocal last_settle
+        size = [0, 0]
+
+        def shoot() -> bytes:
+            png, width, height = capture(name)
+            size[0], size[1] = width, height
+            return png
+
+        outcome = wait_until_settled(
+            shoot,
+            timeout_s=settings.settle_timeout_s,
+            clock=clock,
+            sleep=sleep,
+        )
+        last_settle = outcome if settings.settle_timeout_s > 0 else None
+        return outcome.png, size[0], size[1]
+
     def check(png: bytes) -> Check:
         # The verifier asks two questions and may retry each one. Dividing by
         # the worst case keeps the whole pair inside the one wall-clock
@@ -164,11 +204,29 @@ def run(
             "oracle_error" if outcome.kind == INFRASTRUCTURE else "oracle_inconclusive"
         )
 
-    # Every case starts from a cold app. A run that inherits the last run's
-    # half-open dialog is measuring the previous test as much as this one, and
-    # that is the failure that reads as flakiness rather than as leftover
-    # state. Closing happens before the entry screenshot, so what is captured
-    # and what the oracle checks first is the state the agent really starts in.
+    def outranks_verdict(outcome: Check) -> bool:
+        """May a non-answer from the oracle replace a verdict the runner has?
+
+        Only when the transport failed, because then nothing was measured at
+        all. A judge that answered and was unusable leaves the run exactly as
+        measurable as it was a moment earlier - `stuck` is still `stuck` - and
+        overwriting it filed a real agent failure as a broken harness. That is
+        what happened to the 2026-09-15 20:55 run: detect_stuck had already
+        caught three repeated taps and ended the run correctly.
+        """
+        return outcome.kind == INFRASTRUCTURE
+
+    def noting(detail: str, outcome: Check) -> str:
+        """The oracle's non-answer, kept beside the verdict it did not change."""
+        return f"{detail}; the oracle was inconclusive: {outcome.detail}"
+
+    # Opt-in, and off unless APP_PACKAGE names something. A run that inherits
+    # the last run's half-open dialog is measuring the previous test as much as
+    # this one - but force-stopping by default cost more than it bought: every
+    # run then began on the launcher, the agent spent turn 0 opening the app,
+    # and the next screenshot caught it mid-draw. Closing happens before the
+    # entry screenshot, so what is captured and what the oracle checks first is
+    # the state the agent really starts in.
     if settings.app_package:
         try:
             device.close_app(settings.app_package)
@@ -186,7 +244,7 @@ def run(
             sleep(settings.step_sleep_s)
 
     try:
-        current_png, width, height = capture("entry.png")
+        current_png, width, height = capture_settled("entry.png")
     except Exception as exc:  # noqa: BLE001 - failures become artifacts
         return finish("device_error", f"{type(exc).__name__}: {exc}")
 
@@ -257,6 +315,19 @@ def run(
             _write_json(out_dir / f"turn_{index:03d}.json", record)
             emit(record)
             return finish("parse_error", record["error"])
+
+        # The Check line is the one part of the format the model quietly stops
+        # producing: it survives turn 0 and is gone by turn 1 in every run on
+        # disk. Replaying Check in the history removes the cause; saying so
+        # when it is missing is what makes the next turn put it back instead of
+        # hoping imitation holds.
+        check_reminder = (
+            " You did not write a Check line last turn. Write one now: say"
+            " whether the screen matches your previous Expect, before choosing"
+            " an action."
+            if settings.model_reflection and index > 0 and parsed.check is None
+            else ""
+        )
 
         record.update(
             {
@@ -336,7 +407,10 @@ def run(
             # A false success claim is an attempted action, not a pass.
             actions += 1
             history.append((current_png, qwen_vl.replay(completion.raw)))
-            note = "Your success claim was rejected by the independent checker."
+            note = (
+                "Your success claim was rejected by the independent checker."
+                + check_reminder
+            )
             index += 1
             continue
 
@@ -347,9 +421,12 @@ def run(
 
         try:
             device.execute(pixels)
+            # The minimum delay that lets the tap register at all. The settle
+            # poll below decides how much longer to wait; this is the floor
+            # under it, not a guess at the app's draw time.
             if parsed.action != "wait" and settings.step_sleep_s:
                 sleep(settings.step_sleep_s)
-            after_png, width, height = capture(f"turn_{index:03d}.after.png")
+            after_png, width, height = capture_settled(f"turn_{index:03d}.after.png")
         except Exception as exc:  # noqa: BLE001
             record["error"] = f"{type(exc).__name__}: {exc}"
             turns.append(record)
@@ -361,6 +438,9 @@ def run(
         record["screen_delta"] = round(change.mean, 6)
         record["screen_tile_max"] = round(change.tile_max, 6)
         record["moved"] = change.moved
+        if last_settle is not None:
+            record["settle_ms"] = last_settle.ms
+            record["settled"] = last_settle.settled
         turns.append(record)
         _write_json(out_dir / f"turn_{index:03d}.json", record)
         emit(record)
@@ -372,7 +452,7 @@ def run(
             if change.moved
             else "No localized screen change was detected after your previous action. "
             "Check that against your previous Expect."
-        )
+        ) + check_reminder
         current_png = after_png
 
         if parsed.action != "wait":
@@ -384,17 +464,22 @@ def run(
                     if outcome.holds is True:
                         return finish("verified", "oracle confirmed success despite repetition")
                     if outcome.holds is None:
-                        return finish(oracle_status(outcome), outcome.detail)
+                        if outranks_verdict(outcome):
+                            return finish(oracle_status(outcome), outcome.detail)
+                        return finish("stuck", noting(stuck.detail, outcome))
                 return finish("stuck", stuck.detail)
         index += 1
 
     if remaining() <= 0:
         return finish("timed_out", "wall clock exhausted")
 
+    exhausted = "action or wait budget exhausted"
     if success:
         outcome = check(current_png)
         if outcome.holds is True:
             return finish("verified", "oracle confirmed success on the final check")
         if outcome.holds is None:
-            return finish(oracle_status(outcome), outcome.detail)
-    return finish("budget_exhausted", "action or wait budget exhausted")
+            if outranks_verdict(outcome):
+                return finish(oracle_status(outcome), outcome.detail)
+            return finish("budget_exhausted", noting(exhausted, outcome))
+    return finish("budget_exhausted", exhausted)

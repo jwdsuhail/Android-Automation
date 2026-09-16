@@ -83,6 +83,11 @@ def _oracle_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     return payload
 
 
+# Neither says anything about the agent, so neither may exit like a failed
+# task: one is a harness that broke, the other a judge that would not answer.
+_UNMEASURED = frozenset({"infrastructure", "oracle"})
+
+
 def _exit_code(result: dict[str, Any]) -> int:
     """0 verified, 1 the agent did not get there, 2 nothing was measured.
 
@@ -91,7 +96,7 @@ def _exit_code(result: dict[str, Any]) -> int:
     """
     if result.get("verified"):
         return 0
-    return 2 if result.get("error_class") == "infrastructure" else 1
+    return 2 if result.get("error_class") in _UNMEASURED else 1
 
 
 def _resolve_case(args: argparse.Namespace) -> Case:

@@ -12,7 +12,7 @@ from android_runner.client import ModelClient
 # agent, so the run that carries it is not a measurement of one.
 INFRASTRUCTURE = "infrastructure"
 # A reply arrived and was unusable: not a terminate, an unknown status, or the
-# same answer to the predicate and its negation. The judge, not the network.
+# same answer to the predicate and its complement. The judge, not the network.
 INCONCLUSIVE = "inconclusive"
 OK = "ok"
 
@@ -42,7 +42,10 @@ class Check:
     errors: tuple[str, ...] = ()
     # The two answers themselves. `holds` is the verdict after pairing them;
     # these stay even when that pairing is inconclusive, so the terminal can
-    # show "both said fail" instead of only the pairing error.
+    # show "both said fail" instead of only the pairing error. `negation` and
+    # `negated_raw` keep their names: the second question is now the
+    # complement rather than a negation, but these are artifact keys that
+    # every run on disk and the console already read.
     condition: str | None = None
     negation: str | None = None
 
@@ -62,7 +65,7 @@ class Check:
 
 @dataclass(frozen=True)
 class _Answer:
-    """One question's outcome, before it is paired with its negation."""
+    """One question's outcome, before it is paired with the other."""
 
     holds: bool | None
     raw: str
@@ -88,7 +91,7 @@ def _ask(
     verification.
     """
     messages = qwen_vl.build_messages(
-        question, png, [], history_n, thinking=False, reflection=False
+        question, png, [], history_n, thinking=False, reflection=False, oracle=True
     )
     errors: list[str] = []
     raw = ""
@@ -135,16 +138,27 @@ def verify(
     timeout_s: float,
     attempts: int = 2,
 ) -> Check:
-    """Ask the predicate and its negation using fresh, history-free contexts."""
+    """Ask the predicate and its complement using fresh, history-free contexts.
+
+    Two questions, because one is a coin the model can flip: a judge that
+    answers success to both "is this on screen" and "is something else on
+    screen" has not looked. Both are asked as plain positive questions. The
+    second used to be phrased as a double negative - "is it true that it is NOT
+    the case that X" - which asked the model to confirm a negated proposition
+    and then map the answer back through "success means the negation is
+    visible". That is two inversions to get one bit out, on top of an actor
+    system prompt forbidding the answer, and it is why the pair collapsed.
+    """
     question = (
-        "Look only at the current screen. Is it true that "
-        f"{success}? Return mobile_use terminate with status success if visible "
-        "now, otherwise status fail. Do not perform another action."
+        "Look only at the current screen. Does the screen show that "
+        f"{success}? Return mobile_use terminate with status success if it "
+        "does, otherwise status fail. Do not perform an action."
     )
-    negation = (
-        "Look only at the current screen. Is it true that it is NOT the case that "
-        f"{success}? Return mobile_use terminate with status success if that "
-        "negation is visible now, otherwise status fail. Do not perform an action."
+    complement = (
+        "Look only at the current screen. Does the screen show something other "
+        f"than this: {success}? Return mobile_use terminate with status success "
+        "if the screen shows something else, otherwise status fail. Do not "
+        "perform an action."
     )
     first = _ask(client, png, question, history_n, timeout_s, attempts)
     if first.holds is None:
@@ -158,13 +172,13 @@ def verify(
             condition=_label(first.holds),
         )
 
-    second = _ask(client, png, negation, history_n, timeout_s, attempts)
+    second = _ask(client, png, complement, history_n, timeout_s, attempts)
     spent = first.attempts + second.attempts
     errors = first.errors + second.errors
     if second.holds is None:
         return Check(
             None,
-            f"negation check failed: {second.detail}",
+            f"complement check failed: {second.detail}",
             first.raw,
             second.raw,
             kind=second.kind,
@@ -176,7 +190,7 @@ def verify(
     if first.holds == second.holds:
         return Check(
             None,
-            "oracle gave the same answer to the predicate and its negation",
+            "oracle gave the same answer to the predicate and its complement",
             first.raw,
             second.raw,
             kind=INCONCLUSIVE,
@@ -187,7 +201,7 @@ def verify(
         )
     return Check(
         first.holds,
-        "predicate and negation answers were consistent",
+        "predicate and complement answers were consistent",
         first.raw,
         second.raw,
         kind=OK,

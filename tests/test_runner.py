@@ -67,8 +67,9 @@ class FakeClient:
         self.actor_replies = iter(actor_replies)
         self.oracle_holds = oracle_holds
         self.finish_reason = finish_reason
-        # False makes the judge answer the predicate and its negation the same
-        # way, which is the degenerate verdict the runner must not read as "no".
+        # False makes the judge answer the predicate and its complement the
+        # same way, which is the degenerate verdict the runner must not read
+        # as "no".
         self.negate = negate
         self.oracle_error = oracle_error
         self.oracle_timeouts: list[float | None] = []
@@ -88,7 +89,7 @@ class FakeClient:
             if self.oracle_error:
                 return Completion("", 1, error=self.oracle_error)
             holds = self.oracle_holds()
-            if self.negate and "NOT the case" in instruction:
+            if self.negate and "something other than" in instruction:
                 holds = not holds
             return Completion(
                 reply({"action": "terminate", "status": "success" if holds else "fail"}),
@@ -368,7 +369,9 @@ def test_oracle_prompt_does_not_ask_for_reflection(tmp_path: Path) -> None:
         assert "Expect:" not in messages[0]["content"]
 
 
-def test_history_replays_expect_and_drops_check(tmp_path: Path) -> None:
+def test_history_replays_check_as_well_as_expect(tmp_path: Path) -> None:
+    """The model copies what it is shown. Shown prior turns with no Check, it
+    stops writing one - which is what every run on disk did after turn 0."""
     client = RecordingClient(
         [
             "Check: first step\nExpect: the control is pressed\n" + _click(),
@@ -392,11 +395,59 @@ def test_history_replays_expect_and_drops_check(tmp_path: Path) -> None:
         if message.get("role") == "assistant"
     ]
     assert replayed
-    assert all("Check:" not in text for text in replayed)
+    assert all("Check: first step" in text for text in replayed)
     assert all("Expect: the control is pressed" in text for text in replayed)
     record = json.loads((tmp_path / "turn_000.json").read_text())
     assert record["check"] == "first step"
     assert record["expectation"] == "the control is pressed"
+
+
+def test_a_missing_check_line_is_pointed_out_in_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    """Replaying Check removes the cause; this is what makes it self-healing
+    rather than a bet that imitation holds."""
+    client = RecordingClient(
+        [
+            "Check: first step\nExpect: the control is pressed\n" + _click(),
+            "Expect: the next control is pressed\n" + _click(),
+            "Check: it was pressed\nExpect: done\n" + _click(),
+        ]
+    )
+    run(
+        "tap the control",
+        success=None,
+        device=FakeDevice(),
+        client=client,
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(max_actions=3),
+        sleep=lambda _: None,
+    )
+
+    def now_label(messages: list[dict[str, Any]]) -> str:
+        return str(messages[-1]["content"][-1]["text"])
+
+    # Turn 1 followed a reply that had a Check, so it is told nothing extra.
+    assert "did not write a Check line" not in now_label(client.sent[1])
+    # Turn 2 followed the reply that dropped it.
+    assert "did not write a Check line" in now_label(client.sent[2])
+
+
+def test_turn_zero_is_never_told_off_for_a_missing_check(tmp_path: Path) -> None:
+    """There is nothing to check yet, and the prompt asks for "first step"."""
+    client = RecordingClient([_click(), _click()])
+    run(
+        "tap the control",
+        success=None,
+        device=FakeDevice(),
+        client=client,
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(max_actions=2),
+        sleep=lambda _: None,
+    )
+    assert "did not write a Check line" not in str(client.sent[1][-1]["content"])
 
 
 def test_localized_change_is_moved_with_a_truthful_note(tmp_path: Path) -> None:
@@ -531,8 +582,9 @@ def test_an_unreachable_oracle_is_infrastructure_not_a_failed_task(
 def test_a_degenerate_judge_is_inconclusive_not_an_oracle_error(
     tmp_path: Path,
 ) -> None:
-    """Same answer to the predicate and its negation is the judge failing, not
-    the transport. Both carry no signal, but they have different fixes."""
+    """Same answer to the predicate and its complement is the judge failing,
+    not the transport. Both carry no signal, but they have different fixes,
+    and neither is the harness breaking."""
     client = FakeClient(
         [reply({"action": "terminate", "status": "success"})],
         oracle_holds=lambda: True,
@@ -540,21 +592,99 @@ def test_a_degenerate_judge_is_inconclusive_not_an_oracle_error(
     )
     result = _verifying_run(tmp_path, client, Budget())
     assert result["status"] == "oracle_inconclusive"
-    assert result["error_class"] == "infrastructure"
+    assert result["error_class"] == "oracle"
     assert result["checks"][-1]["kind"] == "inconclusive"
     assert result["checks"][-1]["condition"] == "success"
     assert result["checks"][-1]["negation"] == "success"
 
 
+def test_an_inconclusive_oracle_leaves_a_stuck_verdict_standing(
+    tmp_path: Path,
+) -> None:
+    """The 2026-09-15 20:55 run. detect_stuck had already caught three
+    repeated taps and ended the run correctly; the oracle then answered the
+    same way twice and overwrote `stuck` with `oracle_inconclusive` and
+    `error_class: infrastructure`, which reads as "the harness broke" when
+    what happened is "the agent failed"."""
+
+    class StuckDevice(FakeDevice):
+        def screenshot(self, path: Path) -> tuple[bytes, int, int]:
+            data = png(0)  # never changes, so every tap repeats
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            return data, 100, 200
+
+    client = FakeClient([_click(), _click(), _click()], negate=False)
+    result = run(
+        "tap the control",
+        success="the control is pressed",
+        device=StuckDevice(),
+        client=client,
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(max_actions=10),
+        sleep=lambda _: None,
+    )
+    assert result["status"] == "stuck"
+    assert result["error_class"] == "agent"
+    assert "repeated" in result["detail"]
+    # The oracle's non-answer is recorded beside the verdict, not instead of it.
+    assert "oracle was inconclusive" in result["detail"]
+    assert result["checks"][-1]["kind"] == "inconclusive"
+
+
+def test_a_dead_transport_at_the_stuck_check_still_wins(tmp_path: Path) -> None:
+    """The one case where the oracle may overwrite: no verdict arrived at all,
+    so nothing about the run was measured."""
+
+    class StuckDevice(FakeDevice):
+        def screenshot(self, path: Path) -> tuple[bytes, int, int]:
+            data = png(0)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            return data, 100, 200
+
+    client = FakeClient([_click(), _click(), _click()], oracle_error=TIMEOUT)
+    result = run(
+        "tap the control",
+        success="the control is pressed",
+        device=StuckDevice(),
+        client=client,
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(max_actions=10),
+        sleep=lambda _: None,
+    )
+    assert result["status"] == "oracle_error"
+    assert result["error_class"] == "infrastructure"
+
+
+def test_an_inconclusive_oracle_leaves_budget_exhausted_standing(
+    tmp_path: Path,
+) -> None:
+    client = FakeClient([_click(), _click()], negate=False)
+    result = run(
+        "tap the control",
+        success="the control is pressed",
+        device=FakeDevice(),
+        client=client,
+        settings=SETTINGS,
+        out_dir=tmp_path,
+        budget=Budget(max_actions=2),
+        sleep=lambda _: None,
+    )
+    assert result["status"] == "budget_exhausted"
+    assert result["error_class"] == "agent"
+    assert "oracle was inconclusive" in result["detail"]
+
+
 def test_error_class_separates_a_dead_harness_from_a_failed_task() -> None:
     assert error_class("verified") is None
-    for status in (
-        "device_error",
-        "model_error",
-        "oracle_error",
-        "oracle_inconclusive",
-    ):
+    for status in ("device_error", "model_error", "oracle_error"):
         assert error_class(status) == "infrastructure"
+    # A judge that answered and could not be read is a third thing. Filing it
+    # under infrastructure sent you to restart a server that was working.
+    assert error_class("oracle_inconclusive") == "oracle"
     for status in (
         "parse_error",
         "stuck",
@@ -834,3 +964,72 @@ def test_the_launcher_is_given_time_to_draw_before_the_entry_shot(
         sleep=slept.append,
     )
     assert slept[0] == 1.5
+
+
+class Waiting:
+    """A clock that only moves when the runner sleeps, so the settle loop is
+    measured in polls rather than in how fast this machine ran the test."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def read(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _settling_run(tmp_path: Path, device: FakeDevice, timeout_s: float) -> Any:
+    clock = Waiting()
+    return run(
+        "tap the control",
+        success=None,
+        device=device,
+        client=FakeClient([_click()]),
+        settings=replace(SETTINGS, settle_timeout_s=timeout_s),
+        out_dir=tmp_path,
+        budget=Budget(max_actions=1),
+        clock=clock.read,
+        sleep=clock.sleep,
+    )
+
+
+def test_a_settled_capture_records_what_it_cost(tmp_path: Path) -> None:
+    _settling_run(tmp_path, FakeDevice(), 2)
+    record = json.loads((tmp_path / "turn_000.json").read_text())
+    # One poll: the second frame matched the first, so the screen was already
+    # still and the turn paid 250 ms to find that out.
+    assert record["settle_ms"] == 250.0
+    assert record["settled"] is True
+
+
+def test_a_screen_still_moving_at_the_cap_is_marked(tmp_path: Path) -> None:
+    """`settled: false` is the flag on a screenshot that may be half drawn,
+    which is the thing worth knowing when the model then misreads it."""
+
+    class Flickering(FakeDevice):
+        def __init__(self) -> None:
+            super().__init__()
+            self.shots = 0
+
+        def screenshot(self, path: Path) -> tuple[bytes, int, int]:
+            self.shots += 1
+            data = png(255 if self.shots % 2 else 0)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            return data, 100, 200
+
+    _settling_run(tmp_path, Flickering(), 1)
+    record = json.loads((tmp_path / "turn_000.json").read_text())
+    assert record["settle_ms"] == 1000.0
+    assert record["settled"] is False
+
+
+def test_the_settle_keys_are_absent_when_the_wait_is_off(tmp_path: Path) -> None:
+    """Not `settled: false` on every turn, which would read as "the screen
+    never stopped moving" for a run that never asked."""
+    _settling_run(tmp_path, FakeDevice(), 0)
+    record = json.loads((tmp_path / "turn_000.json").read_text())
+    assert "settle_ms" not in record
+    assert "settled" not in record
