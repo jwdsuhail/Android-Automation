@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,49 @@ def test_detail_returns_the_turns_with_their_rendered_line(tmp_path: Path) -> No
     assert body["turns"][0]["line"] == (
         "click 228,640 of 1000 [mid-left], px 246,1551 moved"
     )
+
+
+def test_detail_preserves_the_check_screenshot_phase_and_turn(tmp_path: Path) -> None:
+    check = {
+        "screenshot": "verify_000.png",
+        "phase": "actor_claim",
+        "turn": 0,
+        "holds": True,
+    }
+    complete_run(tmp_path, "20260914T121427Z", checks=[check])
+    body = client(tmp_path).get("/api/runs/20260914T121427Z").json()
+    assert body["checks"] == [check]
+
+
+def test_a_console_started_live_run_streams_incremental_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_runner.console import server
+
+    run_id = "20260914T121427Z"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    check = {
+        "screenshot": "entry.png",
+        "phase": "entry",
+        "turn": None,
+        "holds": False,
+    }
+    (run_dir / "check_000.json").write_text(json.dumps(check), encoding="utf-8")
+    exited = Launch(
+        run_id=run_id,
+        case_id="audio-metadata",
+        started_at="2026-09-14T12:14:27Z",
+        pid=4242,
+        exit_code=1,
+    )
+    monkeypatch.setattr(Launcher, "status", lambda self, wanted: exited)
+    monkeypatch.setattr(server, "POLL_S", 0)
+
+    response = client(tmp_path).get(f"/api/runs/{run_id}/events")
+    assert response.status_code == 200
+    assert "event: check\n" in response.text
+    assert f"data: {json.dumps(check)}\n" in response.text
 
 
 def test_an_unknown_run_is_a_clean_404(tmp_path: Path) -> None:

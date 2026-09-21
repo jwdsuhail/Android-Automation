@@ -19,7 +19,7 @@ from android_runner.signals import (
     screen_change,
     wait_until_settled,
 )
-from android_runner.verification import INFRASTRUCTURE, Check, verify
+from android_runner.verification import INFRASTRUCTURE, Check, CheckPhase, verify
 
 # A run either measures the agent or it does not. A dead device, a dead server
 # and a judge that never answered say nothing about whether the task was done,
@@ -144,6 +144,8 @@ def run(
     warmup_error: str | None = None
     closed_app: str | None = None
     last_settle: Settled | None = None
+    current_screenshot = "entry.png"
+    current_turn: int | None = None
     emit = on_turn or (lambda _turn: None)
     emit_check = on_check or (lambda _check: None)
 
@@ -202,7 +204,13 @@ def run(
         last_settle = outcome if settings.settle_timeout_s > 0 else None
         return outcome.png, size[0], size[1]
 
-    def check(png: bytes) -> Check:
+    def check(
+        png: bytes,
+        *,
+        screenshot: str,
+        phase: CheckPhase,
+        turn: int | None = None,
+    ) -> Check:
         # Every call gets the actor's own ceiling. There is no run-wide total
         # left to divide between the two questions and their retries, and
         # starving the grader is what made a slow server indistinguishable
@@ -214,9 +222,16 @@ def run(
             settings.model_history_n,
             budget.verify_timeout_s or settings.model_timeout_s,
             max(1, budget.verify_attempts),
+            screenshot=screenshot,
+            phase=phase,
+            turn=turn,
         )
         record = outcome.as_dict()
         checks.append(record)
+        # `run.json` is written only at finish. Keeping each check beside the
+        # turn records lets the directory-backed console stream the existing
+        # on_check payload while the run is still live.
+        write_json(out_dir / f"check_{len(checks) - 1:03d}.json", record)
         emit_check(record)
         return outcome
 
@@ -287,7 +302,11 @@ def run(
         warmup_ms = round((clock() - warmup_started) * 1000, 2)
 
     if success:
-        initial = check(current_png)
+        initial = check(
+            current_png,
+            screenshot=current_screenshot,
+            phase="entry",
+        )
         if initial.holds is True:
             return finish("verified", "success condition held before any action")
 
@@ -409,11 +428,19 @@ def run(
                 )
                 return finish(status, "no independent success condition was supplied")
 
+            verify_name = f"verify_{index:03d}.png"
             try:
-                current_png, width, height = capture(f"verify_{index:03d}.png")
+                current_png, width, height = capture(verify_name)
             except Exception as exc:  # noqa: BLE001
                 return finish("device_error", f"{type(exc).__name__}: {exc}")
-            outcome = check(current_png)
+            current_screenshot = verify_name
+            current_turn = index
+            outcome = check(
+                current_png,
+                screenshot=current_screenshot,
+                phase="actor_claim",
+                turn=current_turn,
+            )
             if outcome.holds is True:
                 return finish("verified", f"oracle confirmed actor claim at turn {index}")
             if outcome.holds is None:
@@ -443,7 +470,8 @@ def run(
             # under it, not a guess at the app's draw time.
             if parsed.action != "wait" and settings.step_sleep_s:
                 sleep(settings.step_sleep_s)
-            after_png, width, height = capture_settled(f"turn_{index:03d}.after.png")
+            after_name = f"turn_{index:03d}.after.png"
+            after_png, width, height = capture_settled(after_name)
         except Exception as exc:  # noqa: BLE001
             record["error"] = f"{type(exc).__name__}: {exc}"
             turns.append(record)
@@ -471,13 +499,20 @@ def run(
             "Check that against your previous Expect."
         ) + check_reminder
         current_png = after_png
+        current_screenshot = after_name
+        current_turn = index
 
         if parsed.action != "wait":
             keys.append(action_key(pixels, width, height))
             stuck = detect_stuck(keys)
             if stuck.stuck:
                 if success:
-                    outcome = check(current_png)
+                    outcome = check(
+                        current_png,
+                        screenshot=current_screenshot,
+                        phase="stuck",
+                        turn=current_turn,
+                    )
                     if outcome.holds is True:
                         return finish("verified", "oracle confirmed success despite repetition")
                     if outcome.holds is None:
@@ -489,7 +524,12 @@ def run(
 
     exhausted = "action or wait budget exhausted"
     if success:
-        outcome = check(current_png)
+        outcome = check(
+            current_png,
+            screenshot=current_screenshot,
+            phase="final",
+            turn=current_turn,
+        )
         if outcome.holds is True:
             return finish("verified", "oracle confirmed success on the final check")
         if outcome.holds is None:

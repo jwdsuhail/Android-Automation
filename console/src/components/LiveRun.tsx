@@ -1,8 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "@phosphor-icons/react";
-import { fileUrl, streamRun, type Outcome, type Turn } from "../api";
+import {
+  fileUrl,
+  streamRun,
+  type Check,
+  type Outcome,
+  type Turn,
+} from "../api";
 import { duration } from "../format";
+import { CheckDetail } from "./CheckDetail";
+import { ScreenViewer } from "./ScreenViewer";
 import { StatusBadge } from "./StatusBadge";
+
+type EvidenceSelection = {
+  type: "turn" | "check";
+  index: number;
+};
 
 /**
  * How much of a budget a run has spent.
@@ -49,30 +62,64 @@ function Meter({
   );
 }
 
-function TurnRow({ runId, turn }: { runId: string; turn: Turn }) {
+function TurnRow({
+  turn,
+  active,
+  first,
+  last,
+  onSelect,
+}: {
+  turn: Turn;
+  active: boolean;
+  first: boolean;
+  last: boolean;
+  onSelect: () => void;
+}) {
+  const rail =
+    first && last
+      ? null
+      : first
+        ? "top-[20px] bottom-0"
+        : last
+          ? "top-0 h-[21px]"
+          : "inset-y-0";
+
   return (
-    <li className="flex animate-[fade_150ms_ease-out] gap-3 px-5 py-3">
-      {turn.marked || turn.screenshot ? (
-        <img
-          src={fileUrl(runId, (turn.marked ?? turn.screenshot) as string)}
-          alt=""
-          loading="lazy"
-          className="h-16 w-auto shrink-0 rounded-sm border border-border"
+    <li className="step-arrive">
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-current={active ? "true" : undefined}
+        className={`row relative flex w-full gap-3 py-3 pr-5 pl-8 text-left transition-colors duration-150 ${
+          active ? "bg-hover" : "hover:bg-hover"
+        }`}
+      >
+        {active && (
+          <span className="absolute inset-y-0 left-0 w-[2px] bg-accent" aria-hidden />
+        )}
+        {rail && (
+          <span className={`absolute left-[16px] w-px bg-border ${rail}`} aria-hidden />
+        )}
+        <span
+          className={`step-node absolute top-[17px] left-[13px] size-[7px] rounded-full ${
+            active ? "step-node-active" : "step-node-complete"
+          }`}
+          aria-hidden
         />
-      ) : (
-        <div className="h-16 w-9 shrink-0 rounded-sm border border-border" aria-hidden />
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
-          <span className="nums text-[11px] text-faint">{turn.index}</span>
-          <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-text">
+        <span className="nums w-[22px] shrink-0 text-right text-[13px] text-faint">
+          {turn.index}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-[12.5px] leading-relaxed text-text">
             {turn.narration ?? turn.action ?? "-"}
           </span>
-        </div>
-        {/* Rendered by format.py on the server and sent as a string, so the
-            browser and the terminal cannot drift apart. */}
-        <p className="nums mt-1 text-[11px] leading-relaxed text-dim">{turn.line}</p>
-      </div>
+          {/* Rendered by format.py on the server and sent as a string, so the
+              browser and the terminal cannot drift apart. */}
+          <span className="nums mt-1 block text-[11px] leading-relaxed text-dim">
+            {turn.line}
+          </span>
+        </span>
+      </button>
     </li>
   );
 }
@@ -89,6 +136,9 @@ export function LiveRun({
   onBack: () => void;
 }) {
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [checks, setChecks] = useState<Check[]>([]);
+  const [selectedTurn, setSelectedTurn] = useState<number | null>(null);
+  const [selectedCheck, setSelectedCheck] = useState<number | null>(null);
   const [outcome, setOutcome] = useState<Outcome>("incomplete");
   const [status, setStatus] = useState("running");
   const [actions, setActions] = useState(0);
@@ -96,29 +146,76 @@ export function LiveRun({
   const [ended, setEnded] = useState<string | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [budgets, setBudgets] = useState<{ actions: number } | null>(null);
-  const bottom = useRef<HTMLDivElement>(null);
+  const bottom = useRef<HTMLLIElement>(null);
   const list = useRef<HTMLUListElement>(null);
-  // Follow the run, unless someone has scrolled back to read an earlier turn.
-  // Yanking them to the bottom every time a turn lands would make the history
-  // unreadable for as long as the run is going.
-  const following = useRef(true);
+  const turnsSeen = useRef<Turn[]>([]);
+  const checksSeen = useRef<Check[]>([]);
+  // Following the selected evidence and following the list scroll are separate.
+  // Selecting an older step freezes the inspector even if that short list is
+  // still physically near its bottom.
+  const latestEvidence = useRef<EvidenceSelection | null>(null);
+  const followLatest = useRef(true);
+  const followScroll = useRef(true);
 
   useEffect(() => {
     setTurns([]);
+    turnsSeen.current = [];
+    setChecks([]);
+    checksSeen.current = [];
+    setSelectedTurn(null);
+    setSelectedCheck(null);
     setEnded(null);
     setActions(0);
     setStartedAt(null);
-    following.current = true;
+    latestEvidence.current = null;
+    followLatest.current = true;
+    followScroll.current = true;
     setStatus("running");
     setOutcome("incomplete");
 
     return streamRun(runId, {
-      onTurn: (turn) =>
-        setTurns((current) =>
-          // The stream replays from the beginning after a reload, so a turn
-          // already held is ignored rather than appended twice.
-          current.some((t) => t.index === turn.index) ? current : [...current, turn],
-        ),
+      onTurn: (turn) => {
+        // The stream replays from the beginning after a reload, so a turn
+        // already held is ignored rather than appended twice.
+        if (turnsSeen.current.some((item) => item.index === turn.index)) return;
+        const next = [...turnsSeen.current, turn];
+        turnsSeen.current = next;
+        setTurns(next);
+        latestEvidence.current = { type: "turn", index: turn.index };
+        if (followLatest.current) {
+          setSelectedTurn(turn.index);
+          setSelectedCheck(null);
+        }
+      },
+      onCheck: (check) => {
+        const duplicate = checksSeen.current.some(
+          (item) =>
+            item.phase === check.phase &&
+            item.turn === check.turn &&
+            item.raw === check.raw &&
+            item.negated_raw === check.negated_raw,
+        );
+        if (duplicate) return;
+        const next = [...checksSeen.current, check];
+        checksSeen.current = next;
+        setChecks(next);
+        const newestTurn = turnsSeen.current.at(-1);
+        // On reconnect the server can replay an entry or earlier actor check
+        // after its turns. It is evidence, but it is not the newest evidence.
+        const isNewest =
+          newestTurn === undefined ||
+          (check.phase !== "entry" &&
+            (check.turn === null ||
+              check.turn === undefined ||
+              check.turn >= newestTurn.index));
+        if (isNewest) {
+          latestEvidence.current = { type: "check", index: next.length - 1 };
+        }
+        if (isNewest && followLatest.current) {
+          setSelectedCheck(next.length - 1);
+          setSelectedTurn(null);
+        }
+      },
       onStatus: (next) => {
         setStatus(next.status);
         setOutcome(next.outcome);
@@ -169,16 +266,21 @@ export function LiveRun({
   }, [runId, ended, startedAt]);
 
   useEffect(() => {
-    if (following.current) {
+    if (followScroll.current) {
       bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     }
-  }, [turns.length]);
+  }, [turns.length, checks.length]);
 
   const live = ended === null;
+  const chosenTurn =
+    turns.find((turn) => turn.index === selectedTurn) ?? turns.at(-1) ?? null;
+  const chosenCheck =
+    selectedCheck === null ? null : (checks[selectedCheck] ?? null);
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="border-b border-border px-5 py-3">
+    <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_clamp(360px,36vw,560px)]">
+      <div className="flex min-h-0 flex-col">
+        <header className="border-b border-border px-5 py-3">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
             <button
@@ -209,22 +311,98 @@ export function LiveRun({
             <span className="nums text-[11px] text-dim">{duration(elapsed)}</span>
           </div>
         </div>
-      </header>
+        </header>
 
-      <ul
-        ref={list}
-        onScroll={() => {
-          const el = list.current;
-          if (el) {
-            following.current =
-              el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-          }
-        }}
-        className="scroll flex-1"
-      >
-        {turns.map((turn) => (
-          <TurnRow key={turn.index} runId={runId} turn={turn} />
-        ))}
+        <ul
+          ref={list}
+          onScroll={() => {
+            const el = list.current;
+            if (el) {
+              followScroll.current =
+                el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            }
+          }}
+          className="scroll flex-1"
+        >
+          {turns.map((turn, index) => (
+            <TurnRow
+              key={turn.index}
+              turn={turn}
+              active={selectedCheck === null && turn.index === selectedTurn}
+              first={index === 0}
+              last={index === turns.length - 1}
+              onSelect={() => {
+                const latest = latestEvidence.current;
+                followLatest.current =
+                  latest?.type === "turn" && latest.index === turn.index;
+                followScroll.current = followLatest.current;
+                setSelectedTurn(turn.index);
+                setSelectedCheck(null);
+              }}
+            />
+          ))}
+          {checks.map((check, index) => {
+            const active = selectedCheck === index;
+            const verdict =
+              check.holds === true
+                ? "pass"
+                : check.holds === false
+                  ? "fail"
+                  : check.kind;
+            const color =
+              check.holds === true
+                ? "var(--pass)"
+                : check.holds === false
+                  ? "var(--agent)"
+                  : "var(--oracle)";
+            return (
+              <li key={`${check.phase ?? "check"}-${index}`} className="step-arrive">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const latest = latestEvidence.current;
+                    followLatest.current =
+                      latest?.type === "check" && latest.index === index;
+                    followScroll.current = followLatest.current;
+                    setSelectedCheck(index);
+                    setSelectedTurn(null);
+                  }}
+                  aria-current={active ? "true" : undefined}
+                  className={`row relative flex w-full items-center gap-3 py-3 pr-5 pl-8 text-left transition-colors duration-150 ${
+                    active ? "bg-hover" : "hover:bg-hover"
+                  }`}
+                >
+                  {active && (
+                    <span
+                      className="absolute inset-y-0 left-0 w-[2px] bg-accent"
+                      aria-hidden
+                    />
+                  )}
+                  <span
+                    className={`step-node absolute top-[17px] left-[13px] size-[7px] rounded-full ${
+                      active ? "step-node-active" : "step-node-complete"
+                    }`}
+                    aria-hidden
+                  />
+                  <span className="nums w-[22px] shrink-0 text-right text-[11px] text-faint">
+                    C{index + 1}
+                  </span>
+                  <span className="min-w-0 flex-1 text-[12px] text-text">
+                    Checker{" "}
+                    <span className="text-dim">
+                      {(check.phase ?? "verification").replaceAll("_", " ")}
+                    </span>
+                  </span>
+                  <span
+                    className="nums shrink-0 text-[11px] font-semibold"
+                    style={{ color }}
+                  >
+                    {verdict}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         {/* Nothing while the run is still live: the footer already says turns
             appear as they are written, and the header is counting. */}
         {turns.length === 0 && !live && (
@@ -232,10 +410,10 @@ export function LiveRun({
             This run wrote no turns. Its console.log holds the reason.
           </li>
         )}
-        <div ref={bottom} />
-      </ul>
+          <li ref={bottom} aria-hidden />
+        </ul>
 
-      <footer className="border-t border-border px-5 py-3">
+        <footer className="border-t border-border px-5 py-3">
         {ended ? (
           <div className="flex items-center justify-between gap-3">
             <span className="text-[11.5px] leading-relaxed text-dim">
@@ -254,7 +432,33 @@ export function LiveRun({
             the run.
           </p>
         )}
-      </footer>
+        </footer>
+      </div>
+
+      <div className="hidden min-h-0 lg:block">
+        {chosenCheck && selectedCheck !== null ? (
+          <CheckDetail runId={runId} check={chosenCheck} index={selectedCheck} />
+        ) : chosenTurn?.screenshot ? (
+          <aside className="flex h-full min-h-0 flex-col border-l border-border">
+            <header className="shrink-0 border-b border-border px-3 py-2">
+              <h3 className="nums text-[12px] font-semibold">
+                Turn {chosenTurn.index}
+              </h3>
+            </header>
+            <ScreenViewer
+              runId={runId}
+              name={chosenTurn.screenshot}
+              alt={`Live turn ${chosenTurn.index}`}
+              turn={chosenTurn}
+              animateAction
+            />
+          </aside>
+        ) : (
+          <aside className="grid h-full place-items-center border-l border-border px-6 text-center text-[12px] text-faint">
+            The current step has no screen evidence yet.
+          </aside>
+        )}
+      </div>
     </div>
   );
 }

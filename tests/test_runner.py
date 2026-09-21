@@ -154,6 +154,10 @@ def test_satisfied_entry_never_touches_device(tmp_path: Path) -> None:
     )
     assert result["status"] == "verified"
     assert device.actions == []
+    assert result["checks"][0]["screenshot"] == "entry.png"
+    assert result["checks"][0]["phase"] == "entry"
+    assert result["checks"][0]["turn"] is None
+    assert (tmp_path / "check_000.json").is_file()
 
 
 def test_false_actor_claim_does_not_pass(tmp_path: Path) -> None:
@@ -179,6 +183,16 @@ def test_false_actor_claim_does_not_pass(tmp_path: Path) -> None:
     assert result["status"] == "verified"
     assert result["actions"] == 2  # false claim plus click
     assert len(device.actions) == 1
+    assert [
+        (check["phase"], check["screenshot"], check["turn"])
+        for check in result["checks"]
+    ] == [
+        ("entry", "entry.png", None),
+        ("actor_claim", "verify_000.png", 0),
+        ("actor_claim", "verify_002.png", 2),
+    ]
+    assert (tmp_path / "verify_000.png").is_file()
+    assert (tmp_path / "verify_002.png").is_file()
 
 
 def test_waits_have_their_own_budget(tmp_path: Path) -> None:
@@ -221,6 +235,12 @@ def test_unsatisfied_final_check_cannot_pass(tmp_path: Path) -> None:
     )
     assert result["status"] == "budget_exhausted"
     assert result["verified"] is False
+    final = result["checks"][-1]
+    assert (final["phase"], final["screenshot"], final["turn"]) == (
+        "final",
+        "turn_000.after.png",
+        0,
+    )
 
 
 def test_history_replays_the_action_without_the_reasoning(tmp_path: Path) -> None:
@@ -631,6 +651,11 @@ def test_an_inconclusive_oracle_leaves_a_stuck_verdict_standing(
     # The oracle's non-answer is recorded beside the verdict, not instead of it.
     assert "oracle was inconclusive" in result["detail"]
     assert result["checks"][-1]["kind"] == "inconclusive"
+    assert (
+        result["checks"][-1]["phase"],
+        result["checks"][-1]["screenshot"],
+        result["checks"][-1]["turn"],
+    ) == ("stuck", "turn_002.after.png", 2)
 
 
 def test_a_dead_transport_at_the_stuck_check_still_wins(tmp_path: Path) -> None:

@@ -382,23 +382,36 @@ Each run writes to `runs/<UTC timestamp>/` unless `--out` is supplied:
 
 ```text
 entry.png
+check_000.json
 turn_000.png
 turn_000.marked.png
 turn_000.raw.txt
 turn_000.json
 turn_000.after.png
+verify_000.png
 run.json
 ```
 
 Two more appear conditionally. `case.json` is written before the first turn
 when the run came from `--case`: the case exactly as it was when run, so
 editing it afterwards does not rewrite history. `console.log` holds the
-runner's stdout and stderr when the console started it, which is where to look
-when a run dies before writing any turn at all.
+runner's stdout and stderr when the console started it. The same bytes are
+tailed into the terminal running `model-console`, while the file remains the
+durable explanation when a run dies before writing any turn at all.
 
-Verification replies are stored under `checks` in `run.json`. A `long_press`
-turn also carries a `hold` block naming the duration executed, who decided
-it, and every adjustment made on the way - see [Hold time](#hold-time).
+Verification replies are stored under `checks` in `run.json`. Every check
+names the exact visual evidence in `screenshot`, its `phase` (`entry`,
+`actor_claim`, `stuck`, or `final`), and its associated zero-based `turn`
+when there is one. Entry checks link `entry.png`; actor claims capture and
+link `verify_NNN.png`; stuck and final checks link the existing last
+`turn_NNN.after.png` instead of duplicating it.
+
+`check_NNN.json` is the same record written incrementally as each oracle call
+returns. It lets the console stream `check` SSE events before the final
+`run.json` exists; `run.json` remains the canonical complete result. A
+`long_press` turn also carries a `hold` block naming the duration executed,
+who decided it, and every adjustment made on the way - see
+[Hold time](#hold-time).
 
 Each turn record also carries `settle_ms` and `settled` - how long the wait for
 a still screen took and whether it got one - unless `MODEL_SETTLE_TIMEOUT_S` is
@@ -436,10 +449,18 @@ cases stay editable. `--runs-dir`, `--cases-dir` (default `cases/`) and
 
 ### Runs
 
-Three columns: every run on the left, the chosen run's turns in the middle,
-the chosen turn's screenshot and numbers on the right. The selected run and
-turn live in the URL, so `/runs/20260914T121427Z?turn=11` is a link you can
-send to someone rather than a place you have to describe.
+Three columns: every run on the left, its actor and checker steps in the
+middle, and the selected screen evidence on the right. The right inspector
+uses the available width, keeps the screenshot visible while its metadata
+scrolls, and expands to native resolution when clicked. Before, Tap and After
+switch between the screen the actor saw, an animated replay of its recorded
+coordinate, and the resulting screen.
+
+The selected evidence lives in the URL, so
+`/runs/20260914T121427Z?turn=11` links to an actor turn and
+`/runs/20260914T121427Z?check=1` links to the second checker call. Selecting a
+checker shows the exact screenshot it judged beside both predicate answers
+and the raw replies.
 
 The action line - `click 228,640 of 1000 [mid-left], px 246,1551 moved` - is
 rendered by `format.py` on the server and sent as a string, so the browser and
@@ -478,12 +499,12 @@ than skipped, on the same principle as an unfinished run. A case keeps its id
 when you rename it, so the runs that recorded it still point at something.
 
 **Run** starts `model-run --case` as a subprocess and streams the run as it
-happens: turns append with their screenshots, a meter shows the action budget
-being spent - the number that decides whether the run dies - and the elapsed
-time counts up beside it. A second Run while one is in flight is refused rather than
-queued - one emulator cannot run two tests at once without each acting on the
-other's screen - and the refusal names the run already going so you can go and
-watch it.
+happens: turns and oracle checks append with their screenshots, a meter shows
+the action budget being spent - the number that decides whether the run dies -
+and the elapsed time counts up beside it. A second Run while one is in flight
+is refused rather than queued - one emulator cannot run two tests at once
+without each acting on the other's screen - and the refusal names the run
+already going so you can go and watch it.
 
 Nothing parses the runner's output. The stream re-reads the run directory, for
 the same reason the Unfinished outcome exists: a run in progress is just an
@@ -491,7 +512,8 @@ unfinished run. Two things follow. A run started at the terminal streams into
 the browser as well as one started here, and reloading mid-run reattaches from
 the directory instead of losing it.
 
-Below 1024px the screenshot column is not shown; this is a desktop tool.
+Below 1024px the list and inspector become separate full-width screens. Tap a
+step to inspect its screenshot, then use Back to return to the timeline.
 
 For development, `npm --prefix console run dev` serves on :5173 with hot
 reload and proxies `/api` to :8765, so `model-console` has to be running too.

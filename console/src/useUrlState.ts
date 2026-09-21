@@ -11,6 +11,7 @@ export interface Route {
   view: "runs" | "cases";
   runId: string | null;
   turn: number | null;
+  check: number | null;
   caseId: string | null;
   /** `new` for an unsaved case, `edit` for an existing one being changed. */
   mode: "new" | "edit" | null;
@@ -20,14 +21,18 @@ export const HOME: Route = {
   view: "runs",
   runId: null,
   turn: null,
+  check: null,
   caseId: null,
   mode: null,
 };
 
 function read(): Route {
   const path = window.location.pathname;
-  const turnParam = new URLSearchParams(window.location.search).get("turn");
+  const params = new URLSearchParams(window.location.search);
+  const turnParam = params.get("turn");
+  const checkParam = params.get("check");
   const turn = turnParam === null ? null : Number(turnParam);
+  const check = checkParam === null ? null : Number(checkParam);
 
   if (path === "/cases/new") {
     return { ...HOME, view: "cases", mode: "new" };
@@ -51,6 +56,7 @@ function read(): Route {
     ...HOME,
     runId: runMatch ? decodeURIComponent(runMatch[1]) : null,
     turn,
+    check,
   };
 }
 
@@ -62,7 +68,12 @@ function href(route: Route): string {
     return route.mode === "edit" ? `${base}/edit` : base;
   }
   if (route.runId === null) return "/";
-  const query = route.turn === null ? "" : `?turn=${route.turn}`;
+  const query =
+    route.check !== null
+      ? `?check=${route.check}`
+      : route.turn !== null
+        ? `?turn=${route.turn}`
+        : "";
   return `/runs/${encodeURIComponent(route.runId)}${query}`;
 }
 

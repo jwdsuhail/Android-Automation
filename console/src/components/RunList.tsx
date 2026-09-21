@@ -1,21 +1,21 @@
 import { useState } from "react";
 import { CaretDown, Funnel, Trash } from "@phosphor-icons/react";
-import type { Outcome, RunSummary } from "../api";
-import { OUTCOME, duration, stamp } from "../format";
+import type { RunSummary } from "../api";
+import { OUTCOME, bucketOf, type Filter, duration, stamp } from "../format";
 
-const FILTERS: (Outcome | "all")[] = [
+const FILTERS: (Filter | "all")[] = [
   "all",
   "pass",
-  "agent",
+  "fail",
   "infrastructure",
-  "oracle",
-  "incomplete",
+  "stopped",
 ];
 
 export function RunList({
   runs,
   selected,
   filter,
+  activeId,
   canDelete,
   onFilter,
   onSelect,
@@ -23,12 +23,16 @@ export function RunList({
 }: {
   runs: RunSummary[];
   selected: string | null;
-  filter: Outcome | "all";
+  filter: Filter | "all";
+  /* The run the launcher says is going, or null. Without it a run in progress
+     has nothing to distinguish it from one that was killed, and sits under
+     "Manually stopped" until it finishes. */
+  activeId: string | null;
   /* `can_run` from the server. One flag covers both endpoints that write to
      `runs/`, so under `--no-run` there is no Select button at all rather than
      one that leads to a refusal. */
   canDelete: boolean;
-  onFilter: (next: Outcome | "all") => void;
+  onFilter: (next: Filter | "all") => void;
   onSelect: (id: string) => void;
   /** Resolves with one message per run that was refused, empty if all went. */
   onDelete: (ids: string[]) => Promise<string[]>;
@@ -39,7 +43,10 @@ export function RunList({
   const [refused, setRefused] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
 
-  const shown = filter === "all" ? runs : runs.filter((r) => r.outcome === filter);
+  const bucket = (run: RunSummary) => bucketOf(run.outcome, run.id === activeId);
+
+  const shown =
+    filter === "all" ? runs : runs.filter((r) => bucket(r) === filter);
 
   // A run can finish, or arrive from the terminal, while this list is open, and
   // the filter can change under a selection. Derived rather than stored so that
@@ -48,8 +55,8 @@ export function RunList({
   const visible = new Set(shown.map((r) => r.id));
   const marked = [...chosen].filter((id) => visible.has(id));
 
-  const count = (key: Outcome | "all") =>
-    key === "all" ? runs.length : runs.filter((r) => r.outcome === key).length;
+  const count = (key: Filter | "all") =>
+    key === "all" ? runs.length : runs.filter((r) => bucket(r) === key).length;
 
   const leave = () => {
     setPicking(false);
@@ -126,7 +133,7 @@ export function RunList({
                   no popover primitive to borrow one from. */}
               <select
                 value={filter}
-                onChange={(e) => onFilter(e.target.value as Outcome | "all")}
+                onChange={(e) => onFilter(e.target.value as Filter | "all")}
                 aria-label="Filter runs by outcome"
                 className="field field-select"
               >
@@ -207,7 +214,7 @@ export function RunList({
 
       <ul className="scroll flex-1">
         {shown.map((run) => {
-          const { icon: Mark, color } = OUTCOME[run.outcome];
+          const { icon: Mark, color, spin } = OUTCOME[bucket(run)];
           const active = run.id === selected;
           const picked = chosen.has(run.id);
           const body = (
@@ -216,7 +223,9 @@ export function RunList({
                 size={14}
                 weight="bold"
                 color={color}
-                className="mt-[2px] shrink-0"
+                className={`mt-[2px] shrink-0 ${
+                  spin ? "motion-safe:animate-spin" : ""
+                }`}
                 aria-hidden
               />
               <span className="min-w-0 flex-1">
@@ -282,7 +291,7 @@ export function RunList({
           <li className="px-3 py-6 text-center text-[12px] text-faint">
             {runs.length === 0
               ? "No runs yet. Start one with model-run."
-              : `No ${OUTCOME[filter as Outcome].label.toLowerCase()} runs.`}
+              : `No ${OUTCOME[filter as Filter].label.toLowerCase()} runs.`}
           </li>
         )}
       </ul>

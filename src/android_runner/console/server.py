@@ -112,17 +112,19 @@ def create_app(
 
     @app.get("/api/runs/{run_id}/events")
     def run_events(run_id: str) -> StreamingResponse:
-        """Turns as they land, read from the run directory.
+        """Turns and oracle checks as they land, read from the run directory.
 
         Nothing parses the runner's output. `reader.py` already rebuilds a run
-        from its `turn_*.json` files, so a run in progress is just an unfinished
-        run - which means a run started at the terminal streams here too.
+        from its incremental turn and check JSON files, so a run in progress is
+        just an unfinished run - which means a run started at the terminal
+        streams here too.
         """
         if store.summary(run_id) is None:
             raise HTTPException(404, f"no run named {run_id!r} in {runs_dir}")
 
         def stream() -> Iterator[str]:
-            sent = 0
+            sent_turns = 0
+            sent_checks = 0
             started = time.monotonic()
             last_change = started
             deadline = started + MAX_STREAM_S
@@ -134,9 +136,14 @@ def create_app(
 
                 payload = detail.as_dict()
                 turns = payload["turns"]
-                while sent < len(turns):
-                    yield _sse("turn", turns[sent])
-                    sent += 1
+                while sent_turns < len(turns):
+                    yield _sse("turn", turns[sent_turns])
+                    sent_turns += 1
+                    last_change = time.monotonic()
+                checks = payload["checks"]
+                while sent_checks < len(checks):
+                    yield _sse("check", checks[sent_checks])
+                    sent_checks += 1
                     last_change = time.monotonic()
                 # `started_at` rides along because a reattached watcher has
                 # no idea when the run began, and an elapsed time counting from

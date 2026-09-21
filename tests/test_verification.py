@@ -55,6 +55,8 @@ def check(client: ScriptedClient, attempts: int = 2):
         SETTINGS.model_history_n,
         5.0,
         attempts,
+        screenshot="entry.png",
+        phase="entry",
     )
 
 
@@ -172,3 +174,6 @@ def test_the_cost_of_a_verdict_reaches_the_artifact() -> None:
     assert record["errors"] == [TIMEOUT]
     assert record["condition"] == "success"
     assert record["negation"] == "fail"
+    assert record["screenshot"] == "entry.png"
+    assert record["phase"] == "entry"
+    assert record["turn"] is None

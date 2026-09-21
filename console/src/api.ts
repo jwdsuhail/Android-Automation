@@ -79,6 +79,9 @@ export interface Check {
   negation: string | null;
   raw: string;
   negated_raw: string;
+  screenshot?: string | null;
+  phase?: "entry" | "actor_claim" | "stuck" | "final" | string;
+  turn?: number | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -192,6 +195,7 @@ export const getActive = () => send<{ active: Launch | null }>("/api/active");
 
 export interface StreamHandlers {
   onTurn: (turn: Turn) => void;
+  onCheck?: (check: Check) => void;
   onStatus: (status: {
     status: string;
     outcome: Outcome;
@@ -213,6 +217,9 @@ export function streamRun(runId: string, handlers: StreamHandlers): () => void {
   const source = new EventSource(`/api/runs/${runId}/events`);
   source.addEventListener("turn", (e) =>
     handlers.onTurn(JSON.parse((e as MessageEvent).data)),
+  );
+  source.addEventListener("check", (e) =>
+    handlers.onCheck?.(JSON.parse((e as MessageEvent).data)),
   );
   source.addEventListener("status", (e) =>
     handlers.onStatus(JSON.parse((e as MessageEvent).data)),

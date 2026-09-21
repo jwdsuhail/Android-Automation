@@ -220,3 +220,131 @@ body {
     transform: none;
   }
 }
+
+/* The selected action is replayed over the screenshot as evidence, not as
+   decoration. It runs once when the turn changes, then leaves a quiet target
+   behind so the coordinate remains readable. */
+.tap-marker {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  border: 2px solid var(--accent);
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 70%);
+  animation: tap-impact 650ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.tap-marker > span {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  transform: translate(-50%, -50%);
+}
+
+.tap-marker-hold {
+  border-width: 3px;
+  animation-duration: 1050ms;
+}
+
+@keyframes tap-impact {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.75);
+  }
+  55% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.gesture-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 10 5;
+  animation: gesture-draw 650ms ease-out both;
+}
+
+.gesture-origin {
+  fill: var(--canvas);
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.gesture-target {
+  fill: var(--accent);
+  stroke: var(--canvas);
+  stroke-width: 2;
+  animation: gesture-land 650ms ease-out both;
+}
+
+@keyframes gesture-draw {
+  from {
+    opacity: 0;
+    stroke-dashoffset: 60;
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes gesture-land {
+  from {
+    opacity: 0;
+  }
+  70% {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.step-node {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--canvas);
+  transition:
+    background-color 150ms,
+    box-shadow 150ms,
+    transform 150ms;
+}
+
+.step-node-complete {
+  background: var(--faint);
+}
+
+.step-node-active {
+  transform: scale(1.25);
+  box-shadow:
+    0 0 0 1px var(--canvas),
+    0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+  animation: step-complete 420ms ease-out;
+}
+
+.step-arrive {
+  animation: fade 180ms ease-out both;
+}
+
+@keyframes step-complete {
+  from {
+    opacity: 0.4;
+    transform: scale(0.5);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.5);
+  }
+  to {
+    transform: scale(1.25);
+  }
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   createCase,
@@ -15,13 +15,14 @@ import {
   type CaseDraft,
   type CaseListing,
   type Launch,
-  type Outcome,
   type RunDetail as Detail,
   type RunSummary,
 } from "./api";
+import type { Filter } from "./format";
 import { CaseDetail } from "./components/CaseDetail";
 import { CaseForm } from "./components/CaseForm";
 import { CaseList } from "./components/CaseList";
+import { CheckDetail } from "./components/CheckDetail";
 import { LiveRun } from "./components/LiveRun";
 import { RunDetail } from "./components/RunDetail";
 import { RunList } from "./components/RunList";
@@ -44,7 +45,7 @@ export default function App() {
   const [route, navigate] = useRoute();
   const [runs, setRuns] = useState<RunSummary[] | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
-  const [filter, setFilter] = useState<Outcome | "all">("all");
+  const [filter, setFilter] = useState<Filter | "all">("all");
   const [error, setError] = useState<string | null>(null);
 
   const [cases, setCases] = useState<CaseListing | null>(null);
@@ -53,6 +54,14 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [mobileInspector, setMobileInspector] = useState(
+    () =>
+      route.view === "runs" &&
+      route.runId !== null &&
+      (new URLSearchParams(window.location.search).has("turn") ||
+        new URLSearchParams(window.location.search).has("check")),
+  );
+  const previousRun = useRef(route.runId);
   // Set only by pressing Run here. Watching a run is a mode of the case
   // screen, not an address - the run has its own once it is worth linking to.
   const [watching, setWatching] = useState<string | null>(null);
@@ -108,12 +117,35 @@ export default function App() {
     };
   }, [route.runId]);
 
-  // A run with no turn chosen leaves the right column empty, which reads as
-  // broken rather than as a prompt. Land on the first turn instead, and say
-  // so in the URL so the address still describes the screen.
   useEffect(() => {
-    if (detail && route.turn === null && detail.turns.length > 0) {
-      navigate({ ...route, runId: detail.id, turn: detail.turns[0].index }, true);
+    if (previousRun.current !== route.runId) {
+      setMobileInspector(false);
+      previousRun.current = route.runId;
+    }
+  }, [route.runId]);
+
+  // A run with no evidence chosen leaves the right column empty, which reads
+  // as broken rather than as a prompt. Prefer the first actor turn; a run that
+  // failed before acting can still land on its first checker screen.
+  //
+  // `detail.id === route.runId` is what makes this safe to run on every route
+  // change. For one render after a different run is picked, `detail` is still
+  // the previous run's - the `setDetail(null)` above is scheduled, not applied
+  // - and navigating to whatever that one holds sends you back to the run you
+  // just left. Replacing rather than pushing, it took the new run's history
+  // entry with it, so no second run could ever be opened.
+  useEffect(() => {
+    if (
+      detail &&
+      detail.id === route.runId &&
+      route.turn === null &&
+      route.check === null
+    ) {
+      if (detail.turns.length > 0) {
+        navigate({ ...route, turn: detail.turns[0].index }, true);
+      } else if (detail.checks.length > 0) {
+        navigate({ ...route, check: 0 }, true);
+      }
     }
   }, [detail, route, navigate]);
 
@@ -132,7 +164,12 @@ export default function App() {
   };
 
   const turn = detail?.turns.find((t) => t.index === route.turn) ?? null;
+  const check =
+    route.check === null ? null : (detail?.checks[route.check] ?? null);
   const chosen = cases?.cases.find((c) => c.id === route.caseId) ?? null;
+  // A launch is remembered after it exits, so `running` is what decides, not
+  // the mere presence of one.
+  const runningId = active?.running ? active.run_id : null;
   // Watching can be reached from the busy banner on a case that is not the one
   // running, so the run's own case is looked up rather than assumed.
   const watched =
@@ -221,13 +258,14 @@ export default function App() {
 
   const showingCases = route.view === "cases";
   const selectedOnRight = showingCases ? route.caseId !== null || route.mode !== null : route.runId !== null;
+  const showMainOnMobile = showingCases || !mobileInspector;
 
   return (
     <div
       className={`grid h-screen grid-cols-1 bg-canvas ${
         showingCases
           ? "lg:grid-cols-[264px_minmax(0,1fr)]"
-          : "lg:grid-cols-[264px_minmax(0,1fr)_372px]"
+          : "lg:grid-cols-[264px_minmax(320px,1fr)_clamp(400px,38vw,640px)]"
       }`}
     >
       {/* Below the breakpoint there is room for one panel, not three. Stacking
@@ -261,6 +299,7 @@ export default function App() {
               runs={runs ?? []}
               selected={route.runId}
               filter={filter}
+              activeId={runningId}
               canDelete={canRun}
               onFilter={setFilter}
               onSelect={(id) => go({ view: "runs", runId: id })}
@@ -271,7 +310,9 @@ export default function App() {
       </div>
 
       <main
-        className={`min-w-0 overflow-hidden ${selectedOnRight ? "block" : "hidden lg:block"}`}
+        className={`min-w-0 overflow-hidden ${
+          selectedOnRight && showMainOnMobile ? "block" : "hidden"
+        } lg:block`}
       >
         {showingCases ? (
           route.mode === "new" || route.mode === "edit" ? (
@@ -298,12 +339,12 @@ export default function App() {
               runs={(runs ?? []).filter((r) => r.case_id === chosen.id)}
               canRun={canRun}
               starting={starting}
-              busyWith={active?.running ? active.run_id : null}
+              busyWith={runningId}
               onRun={() => start(chosen)}
               onEdit={() => go({ view: "cases", caseId: chosen.id, mode: "edit" })}
               onDelete={() => remove(chosen.id)}
               onOpenRun={(runId) =>
-                active?.running && runId === active.run_id
+                runId === runningId
                   ? setWatching(runId)
                   : openRun(runId)
               }
@@ -327,10 +368,21 @@ export default function App() {
         ) : detail ? (
           <RunDetail
             run={detail}
+            running={detail.id === runningId}
             selectedTurn={route.turn}
-            onSelectTurn={(index) =>
-              go({ view: "runs", runId: detail.id, turn: index })
-            }
+            selectedCheck={route.check}
+            onSelectTurn={(index) => {
+              navigate(
+                { ...HOME, view: "runs", runId: detail.id, turn: index },
+              );
+              setMobileInspector(true);
+            }}
+            onSelectCheck={(index) => {
+              navigate(
+                { ...HOME, view: "runs", runId: detail.id, check: index },
+              );
+              setMobileInspector(true);
+            }}
             onBack={() => go({ view: "runs" })}
           />
         ) : route.runId ? (
@@ -348,9 +400,25 @@ export default function App() {
       </main>
 
       {!showingCases && (
-        <div className="hidden min-w-0 lg:block">
-          {detail && turn ? (
-            <TurnDetail runId={detail.id} turn={turn} artifacts={detail.artifacts} />
+        <div
+          className={`min-w-0 ${
+            mobileInspector ? "block" : "hidden"
+          } lg:block`}
+        >
+          {detail && check && route.check !== null ? (
+            <CheckDetail
+              runId={detail.id}
+              check={check}
+              index={route.check}
+              onBack={() => setMobileInspector(false)}
+            />
+          ) : detail && turn ? (
+            <TurnDetail
+              runId={detail.id}
+              turn={turn}
+              artifacts={detail.artifacts}
+              onBack={() => setMobileInspector(false)}
+            />
           ) : (
             <aside className="h-full border-l border-border bg-panel">
               {detail && detail.turns.length === 0 && (

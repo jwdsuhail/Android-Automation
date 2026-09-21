@@ -33,6 +33,7 @@ from android_runner.runner import (
 # matches against this rather than joining user input onto a path.
 ARTIFACT = re.compile(
     r"^(?:entry\.png|run\.json|case\.json|console\.log"
+    r"|check_\d{3}\.json"
     r"|turn_\d{3}(?:\.marked|\.after)?\.png"
     r"|turn_\d{3}\.raw\.txt"
     r"|turn_\d{3}\.json"
@@ -128,6 +129,11 @@ def _load(path: Path) -> dict[str, Any] | None:
 
 def _turn_files(run_dir: Path) -> list[Path]:
     return sorted(run_dir.glob("turn_[0-9][0-9][0-9].json"))
+
+
+def _check_files(run_dir: Path) -> list[Path]:
+    """Incremental oracle records written before run.json exists."""
+    return sorted(run_dir.glob("check_[0-9][0-9][0-9].json"))
 
 
 def _outcome(status: str, verified: bool, complete: bool) -> str:
@@ -276,7 +282,11 @@ class RunStore:
         result = _load(run_dir / "run.json")
         if result is None:
             turns = [t for t in (_load(p) for p in _turn_files(run_dir)) if t is not None]
-            checks: list[dict[str, Any]] = []
+            checks = [
+                check
+                for check in (_load(path) for path in _check_files(run_dir))
+                if check is not None
+            ]
             detail = "run.json was never written - this run did not reach the end"
             warmup_ms = warmup_error = None
         else:

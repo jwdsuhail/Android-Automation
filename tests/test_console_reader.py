@@ -34,9 +34,15 @@ def write_turns(run_dir: Path, turns: list[dict[str, Any]]) -> None:
 
 
 def complete_run(
-    root: Path, run_id: str, *, status: str = "verified", turns: list[dict[str, Any]] | None = None
+    root: Path,
+    run_id: str,
+    *,
+    status: str = "verified",
+    turns: list[dict[str, Any]] | None = None,
+    checks: list[dict[str, Any]] | None = None,
 ) -> Path:
     turns = [CLICK] if turns is None else turns
+    checks = [] if checks is None else checks
     run_dir = root / run_id
     write_turns(run_dir, turns)
     (run_dir / "run.json").write_text(
@@ -52,7 +58,7 @@ def complete_run(
                 "waits": 0,
                 "elapsed_s": 12.5,
                 "turns": turns,
-                "checks": [],
+                "checks": checks,
             }
         ),
         encoding="utf-8",
@@ -172,6 +178,36 @@ def test_detail_of_an_unfinished_run_comes_from_the_turn_files(tmp_path: Path) -
     assert "never written" in detail.detail
 
 
+def test_detail_preserves_check_evidence_fields(tmp_path: Path) -> None:
+    check = {
+        "screenshot": "turn_000.after.png",
+        "phase": "final",
+        "turn": 0,
+        "holds": False,
+    }
+    complete_run(tmp_path, "20260914T121427Z", checks=[check])
+    detail = RunStore(tmp_path).detail("20260914T121427Z")
+    assert detail is not None
+    assert detail.checks == [check]
+
+
+def test_an_unfinished_run_reads_incremental_checks(tmp_path: Path) -> None:
+    run_dir = tmp_path / "20260908T164612Z"
+    write_turns(run_dir, [CLICK])
+    check = {
+        "screenshot": "entry.png",
+        "phase": "entry",
+        "turn": None,
+        "holds": False,
+    }
+    (run_dir / "check_000.json").write_text(json.dumps(check), encoding="utf-8")
+
+    detail = RunStore(tmp_path).detail("20260908T164612Z")
+    assert detail is not None
+    assert detail.summary.complete is False
+    assert detail.checks == [check]
+
+
 def test_an_unknown_run_has_no_detail(tmp_path: Path) -> None:
     assert RunStore(tmp_path).detail("nope") is None
 
@@ -183,6 +219,8 @@ def test_only_artifacts_the_runner_writes_can_be_served(tmp_path: Path) -> None:
     store = RunStore(tmp_path)
 
     assert store.artifact("20260914T121427Z", "turn_000.marked.png") is not None
+    (run_dir / "check_000.json").write_text("{}", encoding="utf-8")
+    assert store.artifact("20260914T121427Z", "check_000.json") is not None
     assert store.artifact("20260914T121427Z", "../secret.txt") is None
     assert store.artifact("20260914T121427Z", "../../etc/passwd") is None
     assert store.artifact("20260914T121427Z", "/etc/passwd") is None

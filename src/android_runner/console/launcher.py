@@ -4,11 +4,10 @@ A subprocess, not a thread. `model-run` drives a device over ADB, and an ADB
 call that never returns would take the console down with it if it shared the
 process. Out of process, a wedged or crashed run costs exactly one run.
 
-Nothing here parses the child's output. The run writes `turn_NNN.json` as it
-goes and `reader.py` already reconstructs a run from those files - that is what
-the `incomplete` outcome exists for. A run in progress is an unfinished run, so
-progress is read from the directory, and a run started at the terminal streams
-into the browser on the same path as one started here.
+Nothing here parses the child's output. It goes directly to `console.log`, and
+a separate tail echoes those same bytes to the terminal running `model-console`.
+The run writes `turn_NNN.json` as it goes and `reader.py` reconstructs progress
+from those files - that is what the `incomplete` outcome exists for.
 """
 
 from __future__ import annotations
@@ -28,6 +27,23 @@ from android_runner.runner import new_run_id
 # be running from a virtualenv whose scripts are not on PATH, and sys.executable
 # is the one interpreter known to have this package installed.
 _MODULE = "android_runner.cli"
+
+# The child flushes every turn line, so this is the maximum extra delay before
+# that line appears in model-console's terminal. It does not delay the child.
+ECHO_POLL_S = 0.1
+ECHO_CHUNK_BYTES = 64 * 1024
+
+
+def _terminal_write(data: bytes) -> None:
+    """Write child bytes to stderr without changing or reassembling lines."""
+    binary = getattr(sys.stderr, "buffer", None)
+    if binary is not None:
+        binary.write(data)
+        binary.flush()
+        return
+    # `sys.stderr` can be replaced by a text-only stream in an embedding host.
+    sys.stderr.write(data.decode("utf-8", errors="replace"))
+    sys.stderr.flush()
 
 
 class Busy(RuntimeError):
@@ -153,18 +169,64 @@ class Launcher:
             )
             self._launches[run_id] = launch
 
+        finished = threading.Event()
+        # Tailing the file rather than piping the child keeps model-run
+        # independent: if this console exits, the child can still finish and
+        # leave its complete diagnostic log behind.
+        threading.Thread(
+            target=self._echo,
+            args=(out_dir / "console.log", launch, finished),
+            name=f"echo-{run_id}",
+            daemon=True,
+        ).start()
         # Reaped off the lock: waiting for a run to finish while holding it
         # would block every other request for the length of the run.
         threading.Thread(
             target=self._reap,
-            args=(process, launch, log),
+            args=(process, launch, log, finished),
             name=f"reap-{run_id}",
             daemon=True,
         ).start()
         return launch
 
-    def _reap(self, process: subprocess.Popen[bytes], launch: Launch, log: Any) -> None:
-        code = process.wait()
-        log.close()
-        with self._lock:
-            launch.exit_code = code
+    def _echo(self, path: Path, launch: Launch, finished: threading.Event) -> None:
+        """Tail one log until the process has exited and every byte is drained."""
+        _terminal_write(f"\n[run {launch.run_id}] started\n".encode())
+        try:
+            with path.open("rb") as source:
+                while True:
+                    chunk = source.read(ECHO_CHUNK_BYTES)
+                    if chunk:
+                        _terminal_write(chunk)
+                        continue
+                    if finished.is_set():
+                        break
+                    finished.wait(ECHO_POLL_S)
+        except OSError as exc:
+            _terminal_write(
+                f"\n[run {launch.run_id}] log unavailable: {exc}\n".encode()
+            )
+        finally:
+            code = launch.exit_code
+            label = "unknown" if code is None else str(code)
+            _terminal_write(f"\n[run {launch.run_id}] exited {label}\n".encode())
+
+    def _reap(
+        self,
+        process: subprocess.Popen[bytes],
+        launch: Launch,
+        log: Any,
+        finished: threading.Event,
+    ) -> None:
+        try:
+            code = process.wait()
+            with self._lock:
+                launch.exit_code = code
+        finally:
+            # Signal only after closing the writer. The echo thread then drains
+            # bytes flushed by Python during interpreter shutdown before it
+            # observes EOF and exits.
+            try:
+                log.close()
+            finally:
+                finished.set()

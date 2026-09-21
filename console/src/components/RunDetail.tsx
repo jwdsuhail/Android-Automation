@@ -14,7 +14,17 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 /** The oracle's two answers, not merely the news that they failed to pair. */
-function OracleCheck({ check }: { check: Check }) {
+function OracleCheck({
+  check,
+  index,
+  active,
+  onSelect,
+}: {
+  check: Check;
+  index: number;
+  active: boolean;
+  onSelect: () => void;
+}) {
   const verdict =
     check.holds === true ? "pass" : check.holds === false ? "fail" : check.kind;
   const color =
@@ -25,11 +35,26 @@ function OracleCheck({ check }: { check: Check }) {
         : "var(--infra)";
 
   return (
-    <div className="rounded-md bg-hover p-3">
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-current={active ? "true" : undefined}
+      className={`row relative w-full rounded-md p-3 text-left transition-colors duration-150 ${
+        active ? "bg-hover" : "hover:bg-hover"
+      }`}
+    >
+      {active && (
+        <span className="absolute inset-y-2 left-0 w-[2px] bg-accent" aria-hidden />
+      )}
       <div className="flex items-center gap-2">
         <span className="nums text-[11px] font-semibold" style={{ color }}>
-          oracle: {verdict}
+          checker {index + 1}: {verdict}
         </span>
+        {check.phase && (
+          <span className="nums text-[10px] text-faint">
+            {check.phase.replaceAll("_", " ")}
+          </span>
+        )}
         {check.attempts > 1 && (
           <span className="nums text-[11px] text-faint">
             {check.attempts} attempts
@@ -51,7 +76,7 @@ function OracleCheck({ check }: { check: Check }) {
           {check.detail}
         </p>
       )}
-    </div>
+    </button>
   );
 }
 
@@ -116,7 +141,9 @@ function TurnRow({
         <span className={`absolute left-[15px] w-px bg-border ${rail}`} aria-hidden />
       )}
       <span
-        className="absolute left-[12px] top-[16px] size-[7px] rounded-full"
+        className={`step-node absolute left-[12px] top-[16px] size-[7px] rounded-full ${
+          active ? "step-node-active" : "step-node-complete"
+        }`}
         style={{
           background: turn.moved === true ? node : "var(--canvas)",
           boxShadow: turn.moved === true ? undefined : `inset 0 0 0 1px ${node}`,
@@ -162,13 +189,20 @@ function TurnRow({
 
 export function RunDetail({
   run,
+  running,
   selectedTurn,
+  selectedCheck,
   onSelectTurn,
+  onSelectCheck,
   onBack,
 }: {
   run: Detail;
+  /** Still writing turns, so its `incomplete` status is not a verdict. */
+  running: boolean;
   selectedTurn: number | null;
+  selectedCheck: number | null;
   onSelectTurn: (index: number) => void;
+  onSelectCheck: (index: number) => void;
   onBack: () => void;
 }) {
   return (
@@ -182,7 +216,12 @@ export function RunDetail({
             <CaretLeft size={13} weight="bold" aria-hidden />
             Runs
           </button>
-          <StatusBadge outcome={run.outcome} status={run.status} size="lg" />
+          <StatusBadge
+            outcome={run.outcome}
+            status={run.status}
+            running={running}
+            size="lg"
+          />
           <span className="nums text-[11px] text-faint">
             {clock(run.started_at, run.id)}
           </span>
@@ -252,7 +291,13 @@ export function RunDetail({
               Verification
             </h3>
             {run.checks.map((check, index) => (
-              <OracleCheck key={index} check={check} />
+              <OracleCheck
+                key={index}
+                check={check}
+                index={index}
+                active={index === selectedCheck}
+                onSelect={() => onSelectCheck(index)}
+              />
             ))}
           </div>
         )}

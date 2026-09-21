@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from android_runner import qwen_vl
 from android_runner.client import ModelClient
@@ -15,6 +15,7 @@ INFRASTRUCTURE = "infrastructure"
 # same answer to the predicate and its complement. The judge, not the network.
 INCONCLUSIVE = "inconclusive"
 OK = "ok"
+CheckPhase = Literal["entry", "actor_claim", "stuck", "final"]
 
 
 def _label(holds: bool | None) -> str | None:
@@ -28,6 +29,11 @@ def _label(holds: bool | None) -> str | None:
 
 @dataclass(frozen=True)
 class Check:
+    # The exact visual evidence judged, and why the judge was called. `turn`
+    # is absent only for entry (or a final check reached before any turn).
+    screenshot: str
+    phase: CheckPhase
+    turn: int | None
     holds: bool | None
     detail: str
     raw: str
@@ -51,6 +57,9 @@ class Check:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "screenshot": self.screenshot,
+            "phase": self.phase,
+            "turn": self.turn,
             "holds": self.holds,
             "detail": self.detail,
             "kind": self.kind,
@@ -137,6 +146,10 @@ def verify(
     history_n: int,
     timeout_s: float,
     attempts: int = 2,
+    *,
+    screenshot: str,
+    phase: CheckPhase,
+    turn: int | None = None,
 ) -> Check:
     """Ask the predicate and its complement using fresh, history-free contexts.
 
@@ -163,9 +176,12 @@ def verify(
     first = _ask(client, png, question, history_n, timeout_s, attempts)
     if first.holds is None:
         return Check(
-            None,
-            first.detail,
-            first.raw,
+            screenshot=screenshot,
+            phase=phase,
+            turn=turn,
+            holds=None,
+            detail=first.detail,
+            raw=first.raw,
             kind=first.kind,
             attempts=first.attempts,
             errors=first.errors,
@@ -177,10 +193,13 @@ def verify(
     errors = first.errors + second.errors
     if second.holds is None:
         return Check(
-            None,
-            f"complement check failed: {second.detail}",
-            first.raw,
-            second.raw,
+            screenshot=screenshot,
+            phase=phase,
+            turn=turn,
+            holds=None,
+            detail=f"complement check failed: {second.detail}",
+            raw=first.raw,
+            negated_raw=second.raw,
             kind=second.kind,
             attempts=spent,
             errors=errors,
@@ -189,10 +208,13 @@ def verify(
         )
     if first.holds == second.holds:
         return Check(
-            None,
-            "oracle gave the same answer to the predicate and its complement",
-            first.raw,
-            second.raw,
+            screenshot=screenshot,
+            phase=phase,
+            turn=turn,
+            holds=None,
+            detail="oracle gave the same answer to the predicate and its complement",
+            raw=first.raw,
+            negated_raw=second.raw,
             kind=INCONCLUSIVE,
             attempts=spent,
             errors=errors,
@@ -200,10 +222,13 @@ def verify(
             negation=_label(second.holds),
         )
     return Check(
-        first.holds,
-        "predicate and complement answers were consistent",
-        first.raw,
-        second.raw,
+        screenshot=screenshot,
+        phase=phase,
+        turn=turn,
+        holds=first.holds,
+        detail="predicate and complement answers were consistent",
+        raw=first.raw,
+        negated_raw=second.raw,
         kind=OK,
         attempts=spent,
         errors=errors,

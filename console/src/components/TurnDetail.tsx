@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
+import { ArrowLeft } from "@phosphor-icons/react";
 import type { Turn } from "../api";
 import { fileUrl } from "../api";
+import { ScreenViewer } from "./ScreenViewer";
 
-type View = "before" | "marked" | "after";
+type View = "before" | "tap" | "after";
 
 /* No rule under the row: the values start at one x instead, and a column edge
    tracks the eye across a 372px panel as well as a hairline did. */
@@ -19,35 +21,51 @@ export function TurnDetail({
   runId,
   turn,
   artifacts,
+  onBack,
 }: {
   runId: string;
   turn: Turn;
   artifacts: string[];
+  onBack?: () => void;
 }) {
   const after = `turn_${String(turn.index).padStart(3, "0")}.after.png`;
   const available: View[] = [];
   if (turn.screenshot) available.push("before");
-  if (turn.marked) available.push("marked");
+  if (turn.screenshot || turn.marked) available.push("tap");
   if (artifacts.includes(after)) available.push("after");
 
-  // The marked copy is the default because it is the only image that shows
-  // what the model aimed at, rather than only where that left the app.
-  const preferred: View = available.includes("marked")
-    ? "marked"
+  // Tap is the default because it replays the action over the exact screen
+  // the model saw. The old marked PNG remains the fallback for legacy turns.
+  const preferred: View = available.includes("tap")
+    ? "tap"
     : (available[0] ?? "before");
   const [view, setView] = useState<View>(preferred);
   useEffect(() => setView(preferred), [preferred, turn.index]);
 
   const name =
-    view === "marked" ? turn.marked : view === "after" ? after : turn.screenshot;
+    view === "tap"
+      ? (turn.screenshot ?? turn.marked)
+      : view === "after"
+        ? after
+        : turn.screenshot;
   const usage = turn.usage ?? {};
 
   return (
-    <aside className="scroll h-full border-l border-border bg-panel">
-      {/* This aside is its own scroll container, so the header has to be told
-          to stay; the other two columns sit outside their scroll areas. */}
-      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-panel px-3 py-2">
-        <h3 className="nums text-[12px] font-semibold">Turn {turn.index}</h3>
+    <aside className="flex h-full min-h-0 flex-col border-l border-border bg-panel">
+      <header className="z-10 flex shrink-0 items-center justify-between border-b border-border bg-panel px-3 py-2">
+        <div className="flex items-center gap-2">
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="rounded-xs p-1 text-dim transition-colors duration-150 hover:bg-hover hover:text-text lg:hidden"
+              aria-label="Back to steps"
+            >
+              <ArrowLeft size={15} weight="bold" aria-hidden />
+            </button>
+          )}
+          <h3 className="nums text-[12px] font-semibold">Turn {turn.index}</h3>
+        </div>
         {available.length > 1 && (
           <div className="flex gap-0.5">
             {available.map((option) => (
@@ -69,27 +87,22 @@ export function TurnDetail({
       </header>
 
       {name ? (
-        <a
-          href={fileUrl(runId, name)}
-          target="_blank"
-          rel="noreferrer"
-          className="block"
-        >
-          {/* The screen is the evidence. A frame around it is decoration. */}
-          <img
-            src={fileUrl(runId, name)}
+        <div className="shrink-0 border-b border-border">
+          <ScreenViewer
+            runId={runId}
+            name={name}
             alt={`Turn ${turn.index}, ${view}`}
-            className="mx-auto max-h-[46vh] w-auto"
-            loading="lazy"
+            turn={turn}
+            animateAction={view === "tap" && name === turn.screenshot}
           />
-        </a>
+        </div>
       ) : (
         <p className="px-3 py-6 text-center text-[11.5px] text-faint">
           This action has no place on the screen, so no image was drawn.
         </p>
       )}
 
-      <div className="px-3 py-2">
+      <div className="scroll min-h-0 flex-1 px-3 py-2">
         {turn.check && (
           <p className="mb-2 text-[11.5px] text-dim">
             <span className="text-faint">check:</span> {turn.check}

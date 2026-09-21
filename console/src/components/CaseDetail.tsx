@@ -147,7 +147,10 @@ export function CaseDetail({
                   className="row flex w-full items-center justify-between gap-3 rounded-sm px-2 py-2 text-left transition-colors duration-150 hover:bg-hover"
                 >
                   <span className="flex min-w-0 items-center gap-2">
-                    <StatusBadge outcome={run.outcome} />
+                    <StatusBadge
+                      outcome={run.outcome}
+                      running={run.id === busyWith}
+                    />
                     <span className="nums truncate text-[11px] text-dim">
                       {stamp(run.started_at, run.id)}
                     </span>

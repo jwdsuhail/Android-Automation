@@ -22,9 +22,13 @@ class FakeProcess:
         self.pid = 4242
         self.released = threading.Event()
         self.code = 0
+        self.exit_output = b""
 
     def wait(self) -> int:
         self.released.wait(timeout=5)
+        if self.exit_output:
+            self.kwargs["stdout"].write(self.exit_output)
+            self.kwargs["stdout"].flush()
         return self.code
 
     def finish(self, code: int = 0) -> None:
@@ -54,6 +58,17 @@ def a_case(tmp_path: Path) -> Case:
 
 def build(tmp_path: Path) -> Launcher:
     return Launcher(tmp_path / "runs", tmp_path / "cases")
+
+
+def terminal_until(capfd: pytest.CaptureFixture[str], marker: str) -> str:
+    """Collect threaded stderr until `marker` arrives, without a blind sleep."""
+    output = ""
+    for _ in range(500):
+        output += capfd.readouterr().err
+        if marker in output:
+            return output
+        threading.Event().wait(0.01)
+    return output
 
 
 def test_a_launch_names_its_run_before_the_child_starts(
@@ -95,6 +110,42 @@ def test_output_is_captured_for_the_failure_that_writes_no_turn(
     launch = build(tmp_path).launch(case)
     assert (tmp_path / "runs" / launch.run_id / "console.log").is_file()
     spawned[0].finish()
+
+
+def test_the_log_is_echoed_to_the_consoles_terminal(
+    tmp_path: Path,
+    spawned: list[FakeProcess],
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Browser-started runs should read like model-run in model-console's terminal."""
+    monkeypatch.setattr(launcher_module, "ECHO_POLL_S", 0)
+    launch = build(tmp_path).launch(a_case(tmp_path))
+    line = b'[0] Tap "New Project".\n     -> click 657,303 moved\n'
+    spawned[0].kwargs["stdout"].write(line)
+    spawned[0].kwargs["stdout"].flush()
+    spawned[0].finish()
+
+    output = terminal_until(capfd, f"[run {launch.run_id}] exited 0")
+    assert line.decode() in output
+    assert (tmp_path / "runs" / launch.run_id / "console.log").read_bytes() == line
+
+
+def test_output_flushed_during_process_exit_is_still_echoed(
+    tmp_path: Path,
+    spawned: list[FakeProcess],
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """The final JSON summary lands at interpreter exit and must be drained."""
+    monkeypatch.setattr(launcher_module, "ECHO_POLL_S", 0)
+    launch = build(tmp_path).launch(a_case(tmp_path))
+    spawned[0].exit_output = b'{"status": "verified"}\nwrote runs/example\n'
+    spawned[0].finish()
+
+    output = terminal_until(capfd, f"[run {launch.run_id}] exited 0")
+    assert '{"status": "verified"}' in output
+    assert "wrote runs/example" in output
 
 
 def test_a_second_launch_is_refused_while_the_first_runs(
