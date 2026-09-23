@@ -55,7 +55,9 @@ def build(settings: Any = SETTINGS) -> ModelClient:
     return ModelClient(settings)
 
 
-def test_sdk_retries_are_off_so_the_wall_clock_holds(fake_openai: Any) -> None:
+def test_sdk_retries_are_off_so_the_timeout_asked_for_is_the_one_paid(
+    fake_openai: Any,
+) -> None:
     """SDK retries reapply the full timeout per attempt and can multiply it."""
     build()
     assert FakeOpenAI.last.init_kwargs["max_retries"] == 0

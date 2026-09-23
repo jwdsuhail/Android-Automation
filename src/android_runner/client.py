@@ -77,9 +77,10 @@ class ModelClient:
             base_url=settings.model_base_url,
             api_key=settings.model_api_key,
             timeout=settings.model_timeout_s,
-            # No SDK retries: they reapply the full timeout to every attempt
-            # and can multiply it well past the run's wall clock. Each call is
-            # one attempt inside the deadline the runner passes in.
+            # No SDK retries: they reapply the full timeout to every
+            # attempt, so a call the runner asked to cap at 180s can quietly
+            # take three times that. Each call is one attempt inside the
+            # timeout the runner passes in.
             max_retries=0,
         )
 

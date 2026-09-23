@@ -1,0 +1,12 @@
+{
+  "id": "log-out-and-log-backin",
+  "name": "Log-out and Log-backIn",
+  "instruction": "Navigate to the FYI app. Tap the profile icon in the bottom navbar, then tap Settings. Swipe down and tap Logout. Tap \"Join the movement\". Tap the +971 country code and search for United States. Enter the mobile number 2345678916 and tap the blue arrow. On the \"Confirm your phone number\" screen, enter 123456 \u2014 type it slowly. Wait for the \"Tell us about yourself\" screen, tap it, then tap the blue arrowmark once the profile picture is visible. Click on \"I understand if i lost my encryption....\" and click on next  a tutorial is gonna appear with just click on the middle 2 times",
+  "success": "1. User logs out from the FYI app \n2. User logs back into the FYI App and can see the chat screen and the navbar with AI, Chat, Projects and Profile",
+  "max_actions": 40,
+  "max_waits": 12,
+  "verify_timeout_s": null,
+  "warmup": true,
+  "created_at": "2026-09-16T13:11:06.606246Z",
+  "updated_at": "2026-09-21T07:40:20.717826Z"
+}

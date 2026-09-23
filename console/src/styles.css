@@ -1,0 +1,350 @@
+@import "tailwindcss";
+/* Self-hosted so the console works with no network, which is the whole
+   point of a tool that runs next to an emulator. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+/* Forced black. Canvas and panels share one ground so the page is a single
+   black field; `--hover` is the only surface that lifts, and it does every
+   lifting job there is: hover, selection, and any block that has to read as a
+   block. Borders mark the columns and nothing else: rows are separated by
+   their own spacing, and the turn list by a single vertical rail, so no rule
+   is drawn between one row and the next. */
+:root {
+  color-scheme: dark;
+
+  --canvas: #000000;
+  --panel: #000000;
+  --hover: #141414;
+  --border: #222222;
+  --border-strong: #333333;
+  --text: #ededed;
+  --dim: #c4c4cb;
+  --faint: #9a9aa3;
+
+  /* Three tiers, and the line between the last two is APCA, not taste.
+     `--text` Lc 96, `--dim` Lc 71 - both clear the Lc >= 66 body floor, so
+     either may carry a sentence. `--faint` is Lc 48: inside the Lc >= 45
+     non-text tier and below the body floor, which makes it right for a label,
+     a count, a unit, a turn index or a truncated preview, and wrong for a
+     paragraph somebody has to read. Help text under a field is a paragraph. */
+
+  --pass: #56d364;
+  --agent: #ff9492;
+  --infra: #e3b341;
+  /* Kept off the amber. A judge that answered and could not be read is not a
+     broken harness, and one colour for both put "your server is down" and
+     "your grader waffled" on the same badge. Lc 65.1 on `#000` and on
+     `--hover`, which is the band the other three outcomes already sit in
+     (`--infra` 65.2, `--pass` 65.9, `--agent` 61.0). */
+  --oracle: #d2a8ff;
+  --incomplete: #9a9aa3;
+
+  --accent: #79b8ff;
+
+  /* Kept apart from `--agent` on purpose. That red means the agent did not
+     reach the goal - a run outcome. This one means a field is wrong. Sharing
+     one red would make "this input is invalid" and "this test failed" the same
+     colour on the same screen, and a case page shows both at once.
+
+     APCA Lc 56 on both grounds - 56.1 on `#000`, 55.4 on `--hover`. That
+     clears the Lc >= 45 non-text tier but not the Lc >= 66 body tier, so this
+     colour draws the border and the glyph and never the message. Error text is
+     set in `--text` at Lc 96, which is the right answer anyway - the sentence
+     explaining the mistake is the part that must be readable, and lightening
+     the red far enough to carry it would collide with `--agent` at Lc 61. */
+  --invalid: #ff8582;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-hover: var(--hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-dim: var(--dim);
+  --color-faint: var(--faint);
+  --color-pass: var(--pass);
+  --color-agent: var(--agent);
+  --color-infra: var(--infra);
+  --color-oracle: var(--oracle);
+  --color-incomplete: var(--incomplete);
+  --color-accent: var(--accent);
+  --color-invalid: var(--invalid);
+
+  /* Three radii, each with one job, so that a nested corner is never rounder
+     than the corner containing it. xs is for leaves: chips, badges, segment
+     buttons. sm is for blocks set into a card: images, <pre>. md is for the
+     cards themselves. There is no lg; nothing here is big enough to need it. */
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-md: 7px;
+
+  /* Two control heights, because a text field is not a chip. The list chrome
+     runs on 24px rows, which is a tag you click, not something you type a
+     sentence into. These match the sizes Vercel's own form controls use. */
+  --spacing-field: 40px;
+  --spacing-field-sm: 32px;
+
+  --font-sans: "Geist Variable", "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  background: #000000;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Coordinates, latencies and deltas are read down a column, so they have to
+   sit in the same place on every row. */
+.nums {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-xs);
+}
+
+/* A row is as wide as the scroll container holding it, so a ring drawn
+   outside the row is clipped left and right and arrives as two more
+   horizontal rules, which is the thing this layout is trying not to draw.
+   Rows get theirs on the inside, square, where the whole ring is visible. */
+.row:focus-visible {
+  outline-offset: -2px;
+  border-radius: 0;
+}
+
+/* Only render scrollbars that carry information. */
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  overscroll-behavior: contain;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* The one primitive the console did not have. Every state is written down
+   here rather than discovered per component, because a form is nothing but
+   states - including one no design system has to name: read-only because a
+   run is in flight, which must stay legible rather than greying out. */
+.field {
+  width: 100%;
+  background: var(--hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 7px 10px;
+  transition: border-color 150ms;
+}
+
+.field:hover:not(:disabled):not(:read-only) {
+  border-color: var(--border-strong);
+}
+
+.field::placeholder {
+  color: var(--faint);
+}
+
+.field[aria-invalid="true"] {
+  border-color: var(--invalid);
+}
+
+.field:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+/* Read-only is not disabled. A run in flight must not be edited, but the case
+   being run is the thing you most want to read while watching it. */
+.field:read-only {
+  border-color: var(--border);
+  color: var(--dim);
+}
+
+/* A select is a field with both ends reserved: the outcome glyph on the left,
+   our own caret on the right. The padding lives here rather than in a utility
+   class because `.field` is unlayered CSS and Tailwind's utilities are not -
+   `pl-8` loses to the `padding` above no matter what order they are written
+   in, which puts the glyph on top of the first letter. */
+.field-select {
+  appearance: none;
+  height: var(--spacing-field-sm);
+  padding: 0 28px 0 32px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* Prose, not data. The instruction and the success condition are sentences a
+   person wrote, so they get a measure rather than a column width. */
+.prose-field {
+  max-width: 68ch;
+  resize: none;
+  overflow: hidden;
+}
+
+/* A turn arriving during a live run. Quiet and short: the run is the thing
+   being watched, not the transition. Disabled wholesale by the
+   prefers-reduced-motion block above. */
+@keyframes fade {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The selected action is replayed over the screenshot as evidence, not as
+   decoration. It runs once when the turn changes, then leaves a quiet target
+   behind so the coordinate remains readable. */
+.tap-marker {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  border: 2px solid var(--accent);
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 70%);
+  animation: tap-impact 650ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.tap-marker > span {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  transform: translate(-50%, -50%);
+}
+
+.tap-marker-hold {
+  border-width: 3px;
+  animation-duration: 1050ms;
+}
+
+@keyframes tap-impact {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.75);
+  }
+  55% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.gesture-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 10 5;
+  animation: gesture-draw 650ms ease-out both;
+}
+
+.gesture-origin {
+  fill: var(--canvas);
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.gesture-target {
+  fill: var(--accent);
+  stroke: var(--canvas);
+  stroke-width: 2;
+  animation: gesture-land 650ms ease-out both;
+}
+
+@keyframes gesture-draw {
+  from {
+    opacity: 0;
+    stroke-dashoffset: 60;
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes gesture-land {
+  from {
+    opacity: 0;
+  }
+  70% {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.step-node {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--canvas);
+  transition:
+    background-color 150ms,
+    box-shadow 150ms,
+    transform 150ms;
+}
+
+.step-node-complete {
+  background: var(--faint);
+}
+
+.step-node-active {
+  transform: scale(1.25);
+  box-shadow:
+    0 0 0 1px var(--canvas),
+    0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+  animation: step-complete 420ms ease-out;
+}
+
+.step-arrive {
+  animation: fade 180ms ease-out both;
+}
+
+@keyframes step-complete {
+  from {
+    opacity: 0.4;
+    transform: scale(0.5);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.5);
+  }
+  to {
+    transform: scale(1.25);
+  }
+}

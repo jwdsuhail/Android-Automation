@@ -68,11 +68,51 @@ def test_thinking_reflection_keeps_thought_and_adds_check_expect() -> None:
     assert "a Thought line, a Check line, an Expect line, an Action line" in prompt
 
 
-def test_oracle_prompt_has_no_reflection_lines() -> None:
+def test_reflection_off_leaves_the_plain_actor_prompt() -> None:
     prompt = qwen_vl.system_prompt(False, reflection=False)
     assert "Check:" not in prompt
     assert "Expect:" not in prompt
     assert "Go straight to the Action line." in prompt
+
+
+def test_the_oracle_prompt_carries_no_action_space() -> None:
+    """A grader that inherits the actor's prompt inherits its last line - "do
+    not terminate with status success unless the requested task is complete" -
+    which is a standing refusal to answer the complement question. That
+    contradiction is what collapsed the pair to (fail, fail)."""
+    prompt = qwen_vl.system_prompt(False, reflection=False, oracle=True)
+    assert prompt is qwen_vl.ORACLE_SYSTEM_PROMPT
+    assert "## Action space" not in prompt
+    assert '"action": "click"' not in prompt
+    assert '"action": "swipe"' not in prompt
+    assert "To open an app" not in prompt
+    assert "If the screen is busy" not in prompt
+    assert "Do not terminate with status success unless" not in prompt
+    # It still has to answer in the envelope the parser reads.
+    assert "<tool_call>" in prompt
+    assert '"action": "terminate", "status": "success|fail"' in prompt
+
+
+def test_the_oracle_prompt_ignores_the_actor_flags() -> None:
+    """It is not a variant of the actor prompt, so neither flag reaches it."""
+    for thinking in (True, False):
+        for reflection in (True, False):
+            assert (
+                qwen_vl.system_prompt(thinking, reflection, oracle=True)
+                is qwen_vl.ORACLE_SYSTEM_PROMPT
+            )
+
+
+def test_every_actor_prompt_says_a_half_drawn_screen_is_busy() -> None:
+    """The deterministic settle is the mechanism; this is the supplement, for
+    the draw that outlasts the cap."""
+    for prompt in (
+        qwen_vl.SYSTEM_PROMPT,
+        qwen_vl.NO_THINK_SYSTEM_PROMPT,
+        qwen_vl.system_prompt(False, reflection=True),
+        qwen_vl.system_prompt(True, reflection=True),
+    ):
+        assert "only part drawn is busy too" in prompt
 
 
 # --- parsing ----------------------------------------------------------------
@@ -222,26 +262,31 @@ def test_check_expect_are_not_treated_as_reasoning() -> None:
     assert parsed.check == "the sheet did not open"
 
 
-def test_replay_starts_at_expect_and_drops_check() -> None:
+def test_replay_keeps_the_check_line() -> None:
+    """Stripping it is what killed it. A model shown prior turns that never
+    carry a Check writes no Check either, and every run on disk shows the line
+    surviving turn 0 and gone by turn 1."""
     raw = (
+        "Thought: the sheet is closed\n"
         "Check: first step\n"
         "Expect: the plus sheet is open\n"
         "Action: tap the plus button\n"
         f"{call(CLICK)}"
     )
     replayed = qwen_vl.replay(raw)
-    assert replayed.startswith("Expect: the plus sheet is open")
-    assert "Check:" not in replayed
+    assert replayed.startswith("Check: first step")
+    assert "Thought:" not in replayed  # reasoning is still dropped
     parsed = qwen_vl.parse(replayed)
+    assert parsed.check == "first step"
     assert parsed.expectation == "the plus sheet is open"
     assert parsed.action == "click"
 
 
-def test_replay_falls_back_to_action_without_expect() -> None:
-    raw = f"Check: first step\nAction: tap it\n{call(CLICK)}"
-    replayed = qwen_vl.replay(raw)
-    assert replayed.startswith("Action: tap it")
-    assert "Check:" not in replayed
+def test_replay_falls_back_through_expect_to_action() -> None:
+    raw = f"Thought: it is right there\nExpect: the sheet opens\n{call(CLICK)}"
+    assert qwen_vl.replay(raw).startswith("Expect: the sheet opens")
+    raw = f"Thought: it is right there\nAction: tap it\n{call(CLICK)}"
+    assert qwen_vl.replay(raw).startswith("Action: tap it")
 
 
 def test_a_nested_expect_label_does_not_leak_to_narration() -> None:
@@ -268,15 +313,63 @@ def messages_for(turns: int, history_n: int) -> list[dict]:
     return qwen_vl.build_messages("do it", png(9), history, history_n)
 
 
+def text_of(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    return " ".join(
+        part["text"] for part in content if part.get("type") == "text"
+    )
+
+
 def test_old_images_are_dropped_but_the_action_trail_survives() -> None:
     """Dropping the pair together erases what the agent already tried, which
-    is what makes it retry the same failing tap."""
+    is what makes it retry the same failing tap. The trail survives as one
+    `user` message rather than as the assistant turns it came from."""
     messages = messages_for(turns=5, history_n=3)
     images = [m for m in messages if qwen_vl._is_image_message(m)]
-    assistants = [m for m in messages if m.get("role") == "assistant"]
     assert len(images) == 3
-    assert len(assistants) == 5
-    assert [f"step {i}" in assistants[i]["content"] for i in range(5)] == [True] * 5
+    # Turns 2, 3 and 4 still have their screens, so they stay as themselves.
+    assistants = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistants) == 2
+    trail = [
+        m
+        for m in messages
+        if m.get("role") == "user" and qwen_vl.TRAIL_LABEL in text_of(m)
+    ]
+    assert len(trail) == 1
+    # Nothing the agent did is forgotten, wherever it now lives.
+    whole = " ".join(text_of(m) for m in messages)
+    assert [f"step {i}" in whole for i in range(5)] == [True] * 5
+
+
+def test_no_two_adjacent_assistant_messages_survive_the_cap() -> None:
+    """The defect this is the direct check for: dropping an image left its
+    assistant turn behind, so a 27-turn run sent 24 consecutive `assistant`
+    messages, each about a screen no longer in the prompt and with no `user`
+    turn between them. No chat template was trained on that shape."""
+    for turns in (1, 2, 5, 12, 27):
+        messages = messages_for(turns=turns, history_n=3)
+        roles = [m.get("role") for m in messages]
+        pairs = list(zip(roles, roles[1:]))
+        assert ("assistant", "assistant") not in pairs, (turns, roles)
+
+
+def test_the_folded_trail_sits_where_the_dropped_turns_were() -> None:
+    """Ahead of the screenshots that survived, so the prompt still reads
+    oldest to newest."""
+    messages = messages_for(turns=5, history_n=3)
+    roles = [m.get("role") for m in messages]
+    first_image = next(
+        i for i, m in enumerate(messages) if qwen_vl._is_image_message(m)
+    )
+    trail_at = next(
+        i
+        for i, m in enumerate(messages)
+        if m.get("role") == "user" and qwen_vl.TRAIL_LABEL in text_of(m)
+    )
+    assert roles[0] == "system"
+    assert trail_at < first_image
 
 
 def test_history_n_counts_the_current_screenshot() -> None:

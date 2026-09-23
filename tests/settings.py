@@ -23,4 +23,13 @@ SETTINGS = Settings(
     adb_timeout_s=10,
     step_sleep_s=0,
     long_press_ms=1000,
+    # Off, so a test that does not care about settling takes one screenshot per
+    # capture as it always did. The tests that do care raise it themselves and
+    # inject a clock, because the real deadline would otherwise be measured
+    # against wall time these fakes never spend.
+    settle_timeout_s=0,
+    # Not the default any more - APP_PACKAGE is empty unless someone opts in -
+    # but set here so the runner tests still exercise the close rather than a
+    # disabled version of it.
+    app_package="com.xuper.chat.app",
 )

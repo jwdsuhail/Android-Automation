@@ -9,7 +9,6 @@ from the parent project.
 - One command: `model-run`
 - One autonomous loop
 - Optional independent success check
-- One wall-clock deadline
 - Separate action and wait budgets
 - Repeat/oscillation detection
 - In-call Check/Expect reflection on the actor, not a second model call
@@ -28,7 +27,10 @@ src/android_runner/
   verification.py  the independent checker
   device.py        ADB
   overlay.py       draws the action's target on the screenshot
+  format.py        renders a turn record as one line of text
+  cases.py         a saved task: the model-run arguments, named and stored
   config.py cli.py
+  console/         optional local web console, see below
 ```
 
 `qwen_vl.py` is named for the model on purpose. A second model means a second
@@ -49,6 +51,10 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
+Add `console` to the extras if you want the web console: `pip install -e
+".[dev,console]"`. The runner itself never imports it, so the core install
+stays `openai` and `pillow`.
+
 Edit `.env`, then confirm the device:
 
 ```bash
@@ -62,12 +68,102 @@ model-run \
   --instruction "Open the Test 14 chat and update the audio metadata" \
   --success "the audio message is labelled Verified Track with the artist Harness" \
   --max-actions 70 \
-  --max-waits 20 \
-  --wall-clock-s 2400
+  --max-waits 20
 ```
 
-Exit code `0` means the independent checker verified `--success`. Every other
-outcome exits `1`; configuration refusal exits `2`.
+Nothing caps a run by elapsed time. There used to be a wall-clock deadline and
+it was the wrong bound: a case that legitimately needs twenty minutes is not a
+case that has hung, and the deadline could not tell them apart. What bounds a
+run is `--max-actions` and `--max-waits`, with `MODEL_TIMEOUT_S` and
+`ADB_TIMEOUT_S` bounding each individual call, so the worst case is the action
+budget times the slowest call rather than one number picked in advance. A run
+that really is wedged is stopped the way any other process is.
+
+### Exit codes
+
+| Code | Meaning | Statuses |
+|------|---------|----------|
+| `0` | The independent checker verified `--success`. | `verified` |
+| `1` | The run measured the agent and it did not get there. | `parse_error`, `stuck`, `budget_exhausted`, `actor_gave_up`, `actor_claimed_success` |
+| `2` | Nothing was measured. The result says nothing about the agent. | `device_error`, `model_error`, `oracle_error`, `oracle_inconclusive`, configuration refusal |
+
+`run.json` carries the same split as `error_class`: `"agent"`,
+`"infrastructure"`, `"oracle"`, or `null` for a pass. A timed-out oracle is not
+a failed task, and reporting it as one makes every red result unreadable.
+
+The two checker statuses are distinct on purpose, and they are not the same
+class. `oracle_error` is `"infrastructure"`: no verdict arrived, the transport
+failed, and the fix is your server. `oracle_inconclusive` is `"oracle"`: a
+reply arrived and was unusable, most often the same answer to the success
+condition and its complement, and the fix is the judge. Filing the second under
+infrastructure sent you to restart a server that was working.
+
+An inconclusive checker no longer overwrites a verdict the run had already
+reached. A run that ended `stuck` or `budget_exhausted` keeps that status and
+records the non-answer in `detail`; only `oracle_error` - nothing measured at
+all - replaces it.
+
+The oracle is retried only when the transport fails. A verdict is never
+retried: asking again until the answer changes is best-of-N, not verification.
+`checks[].attempts` and `checks[].errors` in `run.json` record what each verdict
+cost.
+
+### Cold start
+
+Nothing is force-stopped unless you name a package. Set `APP_PACKAGE` and the
+runner closes it before the entry screenshot:
+
+```bash
+APP_PACKAGE=com.example.other model-run --instruction "..."
+```
+
+```
+adb -s $ADB_DEVICE shell am force-stop com.example.other
+```
+
+This used to be on by default with one package hardcoded, and the isolation was
+not worth what it cost. Force-stopping hands the agent the launcher, so turn 0
+goes on finding and tapping the app icon instead of on the task, and the screen
+it is then shown is the app mid-launch - a half-drawn tab with the navigation
+bar still missing. The agent describes what it can see, which reads as
+hallucination in the transcript and is really a screenshot taken too early.
+
+The trade is real in both directions: a run that inherits the previous run's
+half-open dialog is measuring the last test as much as this one. Name the
+package when that matters more than the cold-start turn.
+
+It is `am force-stop`, not `pm clear`: processes die and the task is dropped,
+storage is untouched, and the account stays signed in. The run records what it
+closed as `closed_app` in `run.json`, and a run that closed nothing has no such
+key.
+
+A package that is not installed is not an error. `am force-stop` exits `0`
+whatever name it is given, so a typo here closes nothing and says nothing;
+check the name with `adb shell pm list packages | grep <name>`.
+
+### Settling
+
+Every screenshot the model is shown - the entry shot and each turn's `after` -
+is taken by polling until two consecutive frames are identical, capped by
+`MODEL_SETTLE_TIMEOUT_S` (3s, `0` to turn it off). A screen that is already
+still costs one extra poll; one still animating costs as long as it takes,
+which is the point. A fixed `MODEL_STEP_SLEEP` cannot do this job: it is always
+too short for a cold launch and too long for a tap that landed instantly.
+
+Running out of the cap is a normal exit, not an error. The newest frame is
+still what the model is shown, and the turn record says so with `settled:
+false`, which is the flag to look for when a turn reads as the model
+misdescribing the screen.
+
+### Warm-up
+
+The first call to a cold vision server pays for weight load, `torch.compile`
+and CUDA graph capture - measured at 13s here against a 5.8s median. `model-run`
+spends one throwaway call on that before the run starts, so no measured turn
+absorbs it, and records the cost as `warmup_ms`. Pass `--no-warmup` to skip it.
+
+`--verify-timeout-s` defaults to `MODEL_TIMEOUT_S`, the same ceiling the actor
+gets.
 
 The success condition must describe something visible on the final screen.
 Split historical or multi-stage requirements into separate runs. A single
@@ -82,6 +178,46 @@ model-run --instruction "Explore Settings" --max-actions 20
 Without `--success`, an actor termination is recorded as
 `actor_claimed_success`, `verified` remains false, and the command exits `1`.
 This prevents an exploratory model claim from being mistaken for a QA pass.
+
+## Saved cases
+
+The arguments above are a test case: an instruction, the condition that proves
+it worked, and the budgets that bound the loop. `--case` gives that set a name
+and a file, so the same test can be the same test twice instead of a command
+line retyped out of shell history.
+
+```bash
+model-run --case cases/audio-metadata.json
+model-run --case cases/audio-metadata.json --max-actions 70   # the flag wins
+```
+
+One JSON file per case in `cases/`, which is the source of truth - no index and
+no database, for the same reason `runs/` has neither:
+
+```json
+{
+  "id": "audio-metadata",
+  "name": "Audio metadata",
+  "instruction": "Open the Test 14 chat and update the audio metadata",
+  "success": "the audio message is labelled Verified Track with the artist Harness",
+  "max_actions": 70,
+  "max_waits": 20,
+  "verify_timeout_s": null,
+  "warmup": true
+}
+```
+
+Any flag given explicitly overrides the file. The one exception is
+`--no-warmup`, which can only turn warm-up off and never back on, so a case
+that stored `"warmup": false` stays off without it. `--instruction` is required
+only when `--case` is absent.
+
+`runs/` is ignored by git and `cases/` is not: a case is an input worth reading
+in a diff, a run is output.
+
+Cases are also written and started from the console below. Both paths validate
+through `Case.validate()` in `cases.py`, so a case the browser rejects is
+rejected at the terminal for the same reason and in the same words.
 
 ## Reading a step
 
@@ -107,6 +243,62 @@ marker sits precisely on the blue play button, over a screen reading
 "Compressing. Please wait.." - correct target, wrong moment - while turn 11's
 sits on the audio waveform, a scrubber that swallows a long press, instead of
 the message body that owns the context menu.
+
+## Hold time
+
+Write the duration into the instruction and it is the duration the device
+holds for:
+
+```bash
+model-run --instruction 'Long press the MP3 in the "Test 14" chat for 3 seconds'
+```
+
+`for 3 seconds`, `for 800ms` and `for 2.5s` all read. The verb nearest the
+duration decides who it belongs to, so `wait for 10 seconds then long press the
+MP3` is a ten second wait and leaves the hold alone. Two *different* stated
+hold times cannot both be enforced from one instruction, so neither is: the
+model chooses per turn and the run record says why.
+
+When the instruction names no time, the model's `duration_ms` stands, falling
+back to `ADB_LONG_PRESS_MS` (default 1000).
+
+Two bounds are applied, and both announce themselves:
+
+- **Floor** - the device's own `long_press_timeout`, read once per run with
+  `settings get secure long_press_timeout` (400ms on an SDK 35 emulator, 500ms
+  assumed when the device will not say). Below it Android delivers a tap, so a
+  shorter request is raised rather than quietly turned into a click.
+- **Ceiling** - `ADB_TIMEOUT_S` less a two second margin, 28000ms by default.
+  `adb shell input swipe` blocks for the whole hold, so a longer one would kill
+  its own call. Raising `ADB_TIMEOUT_S` raises this with it.
+
+Every adjustment lands in `turn_NNN.json` and on the terminal:
+
+```text
+     -> long_press 500,812 of 1000 [bottom-center], px 540,1968, 3000ms from instruction
+     hold: instruction asked for 3s
+     hold: model asked for 800ms, overridden by the instruction
+```
+
+```json
+"hold": {
+  "ms": 3000,
+  "source": "instruction",
+  "requested_ms": 3000,
+  "model_ms": 800,
+  "notes": ["instruction asked for 3s",
+            "model asked for 800ms, overridden by the instruction"]
+}
+```
+
+Qwen's own `mobile_use` schema spells this parameter `time`, in **seconds**,
+shared with `wait`; this prompt asks for `duration_ms`, in **milliseconds**, on
+`long_press` alone. So `duration_ms: 3` meaning three seconds is the mistake
+the model is primed to make, and unrepaired it is a 3ms hold - a tap, while
+every artifact still reads `3`. Such a value is read as seconds and the repair
+is recorded, so the mistakes can be counted. A `duration_ms` that is not a
+positive number ends the run as `parse_error`, the agent's fault, rather than
+surfacing from inside ADB as a dead device.
 
 ## Serving on Ollama
 
@@ -165,9 +357,18 @@ Action: what it does now.
 ```
 
 The prompt already contains the screen from before the last action (`BEFORE`)
-and the screen after it (`NOW`). Replayed history keeps `Expect` and `Action`
-and drops `Check`. `MODEL_REFLECTION=0` turns the lines off. Reflection
-requires `MODEL_HISTORY_N` of at least 2 so that before/after pair is present.
+and the screen after it (`NOW`). Replayed history keeps all three lines,
+`Check` included. It used to strip `Check`, and the model copies what it is
+shown: across every run on disk the line appeared on turn 0, sometimes turn 1,
+and then never again. If a reply still arrives without one, the next turn's
+prompt says so. `MODEL_REFLECTION=0` turns the lines off. Reflection requires
+`MODEL_HISTORY_N` of at least 2 so that before/after pair is present.
+
+Turns whose screenshots have aged out of `MODEL_HISTORY_N` are not left in the
+prompt as bare assistant messages. They are folded into one labelled user
+message listing the actions taken so far, so the roles keep alternating; a run
+of 18 consecutive assistant turns describing screens that are no longer in the
+prompt is a shape no chat template was trained on.
 
 A localized pixel change on the screenshot is fed back as a note. It is evidence
 that something moved, not proof the action succeeded. No localized change is
@@ -181,20 +382,141 @@ Each run writes to `runs/<UTC timestamp>/` unless `--out` is supplied:
 
 ```text
 entry.png
+check_000.json
 turn_000.png
 turn_000.marked.png
 turn_000.raw.txt
 turn_000.json
 turn_000.after.png
+verify_000.png
 run.json
 ```
 
-Verification replies are stored under `checks` in `run.json`.
+Two more appear conditionally. `case.json` is written before the first turn
+when the run came from `--case`: the case exactly as it was when run, so
+editing it afterwards does not rewrite history. `console.log` holds the
+runner's stdout and stderr when the console started it. The same bytes are
+tailed into the terminal running `model-console`, while the file remains the
+durable explanation when a run dies before writing any turn at all.
+
+Verification replies are stored under `checks` in `run.json`. Every check
+names the exact visual evidence in `screenshot`, its `phase` (`entry`,
+`actor_claim`, `stuck`, or `final`), and its associated zero-based `turn`
+when there is one. Entry checks link `entry.png`; actor claims capture and
+link `verify_NNN.png`; stuck and final checks link the existing last
+`turn_NNN.after.png` instead of duplicating it.
+
+`check_NNN.json` is the same record written incrementally as each oracle call
+returns. It lets the console stream `check` SSE events before the final
+`run.json` exists; `run.json` remains the canonical complete result. A
+`long_press` turn also carries a `hold` block naming the duration executed,
+who decided it, and every adjustment made on the way - see
+[Hold time](#hold-time).
+
+Each turn record also carries `settle_ms` and `settled` - how long the wait for
+a still screen took and whether it got one - unless `MODEL_SETTLE_TIMEOUT_S` is
+`0`, in which case both keys are absent rather than reporting `false` on every
+turn.
 
 `turn_NNN.marked.png` is `turn_NNN.png` with the action's target drawn on it: a
 crosshair for a tap or long press, an arrow for a swipe or drag. Actions with no
 place on the screen - `type`, `wait`, `system_button`, `terminate` - write no
 marked copy rather than a duplicate of the screenshot.
+
+## Console
+
+A local web console for reading runs and for writing and running cases.
+
+```bash
+pip install -e ".[console]"
+npm --prefix console install
+npm --prefix console run build
+model-console                 # http://127.0.0.1:8765
+```
+
+It is not read-only. It reads `runs/`, it reads and writes `cases/`, it can
+spawn one `model-run` at a time as a subprocess, and it can delete a run
+directory. It never edits a run - the only change it will make to one is to
+remove it whole - and there is no stop button, so a run started here is stopped
+the way any other process is.
+
+It binds `127.0.0.1` and has no authentication, which remains the whole of its
+threat model. Anything that can reach the port can edit a case, start a run on
+your emulator, and delete results. `--no-run` omits both endpoints that write
+to `runs/` - starting and deleting - which leaves that directory read-only;
+cases stay editable. `--runs-dir`, `--cases-dir` (default `cases/`) and
+`--port` move the rest.
+
+### Runs
+
+Three columns: every run on the left, its actor and checker steps in the
+middle, and the selected screen evidence on the right. The right inspector
+uses the available width, keeps the screenshot visible while its metadata
+scrolls, and expands to native resolution when clicked. Before, Tap and After
+switch between the screen the actor saw, an animated replay of its recorded
+coordinate, and the resulting screen.
+
+The selected evidence lives in the URL, so
+`/runs/20260914T121427Z?turn=11` links to an actor turn and
+`/runs/20260914T121427Z?check=1` links to the second checker call. Selecting a
+checker shows the exact screenshot it judged beside both predicate answers
+and the raw replies.
+
+The action line - `click 228,640 of 1000 [mid-left], px 246,1551 moved` - is
+rendered by `format.py` on the server and sent as a string, so the browser and
+the terminal cannot drift apart. See [Reading a step](#reading-a-step).
+
+Runs are sorted into five outcomes, each with a glyph and a word as well as a
+colour:
+
+| Outcome | Means |
+|---|---|
+| Verified | the oracle confirmed the success condition |
+| Not reached | the agent did not get there: `error_class` is `agent` |
+| Infrastructure | something broke: `error_class` is `infrastructure` |
+| No verdict | the judge answered and could not be read: `oracle_inconclusive` |
+| Unfinished | no `run.json`, reconstructed from the `turn_*.json` files |
+
+The last row matters more than it looks. `run.json` is written only when a run
+reaches the end, so a crashed or interrupted run leaves nothing but its turns -
+and those are often the runs worth reading. The console rebuilds them rather
+than hiding the directory.
+
+The outcome dropdown filters the list; the count beside each outcome is of the
+whole directory, not of what is on screen. **Select** turns the list into
+checkboxes and offers a delete, which removes the run directories outright -
+screenshots, turn records and all. There is no trash: `runs/` is ignored by
+git, so a deleted run has no other copy anywhere. A run that is still being
+written is refused by name rather than deleted out from under the process
+writing it.
+
+### Cases
+
+The Cases tab lists what is in `cases/` and edits it. Saving writes the JSON
+file described in [Saved cases](#saved-cases) and nothing else; deleting
+removes that file. A file that will not parse is listed with its error rather
+than skipped, on the same principle as an unfinished run. A case keeps its id
+when you rename it, so the runs that recorded it still point at something.
+
+**Run** starts `model-run --case` as a subprocess and streams the run as it
+happens: turns and oracle checks append with their screenshots, a meter shows
+the action budget being spent - the number that decides whether the run dies -
+and the elapsed time counts up beside it. A second Run while one is in flight
+is refused rather than queued - one emulator cannot run two tests at once
+without each acting on the other's screen - and the refusal names the run
+already going so you can go and watch it.
+
+Nothing parses the runner's output. The stream re-reads the run directory, for
+the same reason the Unfinished outcome exists: a run in progress is just an
+unfinished run. Two things follow. A run started at the terminal streams into
+the browser as well as one started here, and reloading mid-run reattaches from
+the directory instead of losing it.
+
+Below 1024px the list and inspector become separate full-width screens. Tap a
+step to inspect its screenshot, then use Back to return to the timeline.
+
+For development, `npm --prefix console run dev` serves on :5173 with hot
+reload and proxies `/api` to :8765, so `model-console` has to be running too.
 
 ## Tests
 
@@ -213,4 +535,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-No parent-repository path or package is referenced.
+No parent-repository path or package is referenced. The console's
+`node_modules` and its build output are not copied by git; rebuild them with
+`npm --prefix console install && npm --prefix console run build` if you want
+it, or leave them out entirely.
