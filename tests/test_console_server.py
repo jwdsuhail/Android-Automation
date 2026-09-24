@@ -63,9 +63,9 @@ def test_a_console_started_live_run_streams_incremental_checks(
     run_dir = tmp_path / run_id
     run_dir.mkdir()
     check = {
-        "screenshot": "entry.png",
-        "phase": "entry",
-        "turn": None,
+        "screenshot": "turn_000.after.png",
+        "phase": "final",
+        "turn": 0,
         "holds": False,
     }
     (run_dir / "check_000.json").write_text(json.dumps(check), encoding="utf-8")

@@ -84,7 +84,7 @@ that really is wedged is stopped the way any other process is.
 | Code | Meaning | Statuses |
 |------|---------|----------|
 | `0` | The independent checker verified `--success`. | `verified` |
-| `1` | The run measured the agent and it did not get there. | `parse_error`, `stuck`, `budget_exhausted`, `actor_gave_up`, `actor_claimed_success` |
+| `1` | The run measured the agent and it did not get there. | `parse_error`, `stuck`, `budget_exhausted`, `actor_gave_up`, `actor_claimed_success`, `checkpoints_incomplete` |
 | `2` | Nothing was measured. The result says nothing about the agent. | `device_error`, `model_error`, `oracle_error`, `oracle_inconclusive`, configuration refusal |
 
 `run.json` carries the same split as `error_class`: `"agent"`,
@@ -166,8 +166,9 @@ absorbs it, and records the cost as `warmup_ms`. Pass `--no-warmup` to skip it.
 gets.
 
 The success condition must describe something visible on the final screen.
-Split historical or multi-stage requirements into separate runs. A single
-emulator cannot prove what another participant sees.
+Split historical or multi-stage requirements into separate runs, or name them
+as [steps](#named-steps) checked on the way. A single emulator cannot prove
+what another participant sees.
 
 ## Exploration run
 
@@ -203,7 +204,8 @@ no database, for the same reason `runs/` has neither:
   "max_actions": 70,
   "max_waits": 20,
   "verify_timeout_s": null,
-  "warmup": true
+  "warmup": true,
+  "checkpoints": []
 }
 ```
 
@@ -218,6 +220,61 @@ in a diff, a run is output.
 Cases are also written and started from the console below. Both paths validate
 through `Case.validate()` in `cases.py`, so a case the browser rejects is
 rejected at the terminal for the same reason and in the same words.
+
+### Named steps
+
+A success condition can only describe the last screen. Everything on the way to
+it is graded by the agent's own `Check:` line, which is the self-report an
+independent judge exists to distrust. Two runs of the log-out case verified on
+"1. User logs out 2. User logs back in": the judge's own justification cites
+only item 2, and item 1 cannot be evidenced on a screen showing a signed-in
+user. An agent that tapped Cancel on the logout dialog would have produced an
+identical verdict in identical words.
+
+A checkpoint is the same oracle, asked earlier:
+
+```json
+{
+  "id": "logged-out",
+  "condition": "the screen shows the signed-out FYI app, with no account signed in",
+  "after": "log\\s*-?\\s*out|sign\\s*out",
+  "required": true,
+  "max_polls": 3
+}
+```
+
+`after` is a case-insensitive pattern matched against what the agent said it
+was doing - its narration and its `Expect` line - and the step is checked on
+the settled screen that turn left behind. It is not a turn number: two runs of
+one case diverge from turn 1 and never realign, so turn 5 is the confirm dialog
+in one run and a sign-up screen in the other. What both contain is a turn whose
+narration says logout. The self-report decides *when to look*; the oracle still
+decides what is true, and the self-report is never the evidence.
+
+Leave `after` out to check a step once, at the end. A step whose trigger never
+fires is also checked there, so an oddly worded turn is not on its own the
+reason a step reads as missed; the ladder records `triggered: false` so that
+case stays distinguishable from a step that fired and genuinely failed. One is
+a pattern to fix, the other an agent to fix.
+
+A verified run now also requires every `required` step to have been met.
+Missing one is `checkpoints_incomplete`, class `"agent"`, exit `1`. A step
+nobody could get an answer about is *not* the agent's failure: it exits `2` as
+`oracle_inconclusive`, or `oracle_error` when the transport died, the same
+split the rest of the runner draws.
+
+Cost is bounded by the number of steps, not the number of turns. A step is put
+to the oracle only at a turn that matched it, and never again once met; five
+steps resolving on the first trigger is ten extra model calls, about +60s on a
+280s run. `max_polls` (default 3) caps how often one step may be re-asked, which
+is what stops a pattern matching every turn from spending the run on one
+question; `Budget.max_checkpoint_polls` sets a whole-run ceiling above it.
+
+One blind spot remains, and `required: false` exists for it: a condition true
+only between two settled screenshots is never photographed. A tutorial coachmark
+shown once and dismissed by the next tap is the example - the same blind spot
+that makes the stuck detector read a coachmark tour as repetition. An
+observational step is recorded and can never hold back a pass.
 
 ## Reading a step
 
@@ -400,11 +457,18 @@ tailed into the terminal running `model-console`, while the file remains the
 durable explanation when a run dies before writing any turn at all.
 
 Verification replies are stored under `checks` in `run.json`. Every check
-names the exact visual evidence in `screenshot`, its `phase` (`entry`,
-`actor_claim`, `stuck`, or `final`), and its associated zero-based `turn`
-when there is one. Entry checks link `entry.png`; actor claims capture and
-link `verify_NNN.png`; stuck and final checks link the existing last
-`turn_NNN.after.png` instead of duplicating it.
+names the exact visual evidence in `screenshot`, its `phase` (`actor_claim`,
+`stuck`, `final`, or `checkpoint`), and its associated zero-based `turn` when
+there is one. Actor claims capture and link `verify_NNN.png`; stuck, final and
+checkpoint checks link the existing `turn_NNN.after.png` instead of
+duplicating it. A
+`checkpoint` check also carries `checkpoint_id` and `checkpoint_index`, naming
+the [step](#named-steps) it was asked about.
+
+A case with steps also writes a `checkpoints` block: one entry per step with
+its `id`, `condition`, `required`, whether it was `met`, whether its trigger
+`triggered`, how many times it was asked (`polls`), and the `turn` and
+`screenshot` it was decided at. A case without steps writes no such key.
 
 `check_NNN.json` is the same record written incrementally as each oracle call
 returns. It lets the console stream `check` SSE events before the final
@@ -466,13 +530,20 @@ The action line - `click 228,640 of 1000 [mid-left], px 246,1551 moved` - is
 rendered by `format.py` on the server and sent as a string, so the browser and
 the terminal cannot drift apart. See [Reading a step](#reading-a-step).
 
+A case with [named steps](#named-steps) also shows a ladder under its turns:
+each step, whether it was met, whether its trigger ever fired, and the turn it
+was decided at, clicking through to the check that decided it. This is the view
+that answers "which step broke", and it is rebuilt from `case.json` and the
+`check_NNN.json` files while a run is still going rather than waiting for
+`run.json`.
+
 Runs are sorted into five outcomes, each with a glyph and a word as well as a
 colour:
 
 | Outcome | Means |
 |---|---|
 | Verified | the oracle confirmed the success condition |
-| Not reached | the agent did not get there: `error_class` is `agent` |
+| Not reached | the agent did not get there, including a required step it never passed through: `error_class` is `agent` |
 | Infrastructure | something broke: `error_class` is `infrastructure` |
 | No verdict | the judge answered and could not be read: `oracle_inconclusive` |
 | Unfinished | no `run.json`, reconstructed from the `turn_*.json` files |
@@ -492,9 +563,9 @@ writing it.
 
 ### Cases
 
-The Cases tab lists what is in `cases/` and edits it. Saving writes the JSON
-file described in [Saved cases](#saved-cases) and nothing else; deleting
-removes that file. A file that will not parse is listed with its error rather
+The Cases tab lists what is in `cases/` and edits it, including the named steps
+and their triggers. Saving writes the JSON file described in
+[Saved cases](#saved-cases) and nothing else; deleting removes that file. A file that will not parse is listed with its error rather
 than skipped, on the same principle as an unfinished run. A case keeps its id
 when you rename it, so the runs that recorded it still point at something.
 

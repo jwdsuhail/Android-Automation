@@ -406,7 +406,41 @@ def _infer_missing_action(arguments: dict[str, Any]) -> dict[str, Any]:
     return arguments
 
 
-def parse(raw: str, reasoning: str | None = None) -> ParsedAction:
+def _unwrap_bare_arguments(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept an arguments object emitted without its `mobile_use` envelope.
+
+    Observed from the oracle in runs/20260921T085200Z and
+    runs/20260922T092851Z: it reasons correctly, writes an Action line, and
+    then emits `{"action": "terminate", "status": "fail"}` with no wrapper.
+    `parse` rejected that as `expected tool name mobile_use, got None`, so
+    every check in those runs died inconclusive - the judge answered and the
+    harness could not hear it.
+
+    Narrow, like `_infer_missing_action`: only a payload that names no tool at
+    all is treated this way, and only when it carries the fields an arguments
+    object carries. A payload naming some *other* tool is still refused, and
+    the actor never takes this path - `parse` asks for it explicitly.
+    """
+    if payload.get("name") is not None:
+        return payload
+    looks_like_arguments = "action" in payload or str(
+        payload.get("status", "")
+    ).lower() in ("success", "fail")
+    if not looks_like_arguments:
+        return payload
+    return {"name": "mobile_use", "arguments": payload}
+
+
+def parse(
+    raw: str, reasoning: str | None = None, *, bare_arguments: bool = False
+) -> ParsedAction:
+    """Read one reply. `bare_arguments` relaxes the envelope for the oracle.
+
+    The actor's contract stays strict: it is driving a device, and a reply
+    whose shape is in doubt is a reply whose target is in doubt. The oracle
+    returns one bit and touches nothing, so the same strictness there only
+    throws away verdicts that arrived.
+    """
     cleaned, extracted = extract_reasoning(raw, reasoning)
     thought = _labelled(_THOUGHT_LINE_RE, cleaned)
     check = _labelled(_CHECK_LINE_RE, cleaned)
@@ -473,6 +507,8 @@ def parse(raw: str, reasoning: str | None = None) -> ParsedAction:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid tool_call JSON: {exc}") from exc
+    if bare_arguments:
+        payload = _unwrap_bare_arguments(payload)
     if payload.get("name") != "mobile_use":
         raise ValueError(f"expected tool name mobile_use, got {payload.get('name')!r}")
     arguments = payload.get("arguments")

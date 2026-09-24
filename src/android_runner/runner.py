@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, Sequence
 
 from android_runner import hold, overlay, qwen_vl
 from android_runner.client import Completion, truncation_note
@@ -39,6 +40,13 @@ _ORACLE_STATUSES = frozenset({"oracle_inconclusive"})
 ORACLE = "oracle"
 AGENT = "agent"
 
+# A required checkpoint the run never passed through, with a real "no" from
+# the judge behind it. It falls through `error_class` to `AGENT` because that
+# is what it is: the harness worked, the judge answered, and the agent did not
+# go through the state the case names. A rung that was never *answered* is a
+# different thing and is filed as one of the two oracle statuses instead.
+CHECKPOINTS_INCOMPLETE = "checkpoints_incomplete"
+
 # Neither says anything about the agent. A caller deciding whether a run
 # measured anything wants this set, not the individual strings.
 UNMEASURED = frozenset({INFRASTRUCTURE, ORACLE})
@@ -60,6 +68,22 @@ class DeviceLike(Protocol):
     def execute(self, action: dict[str, Any]) -> None: ...
     def long_press_floor_ms(self) -> int: ...
     def close_app(self, package: str) -> None: ...
+
+
+class CheckpointLike(Protocol):
+    """What the loop needs from a rung of the case.
+
+    Structural rather than imported, for the same reason `DeviceLike` is:
+    `cases.py` imports this module for the budget defaults, so importing
+    `cases.Checkpoint` back would be a cycle - and the loop has no business
+    knowing that a saved case is where these usually come from.
+    """
+
+    id: str
+    condition: str
+    after: str | None
+    required: bool
+    max_polls: int
 
 
 class ClientLike(Protocol):
@@ -84,6 +108,11 @@ def new_run_id() -> str:
 # and the terminal and the console cannot start from different ceilings.
 DEFAULT_MAX_ACTIONS = 20
 DEFAULT_MAX_WAITS = 12
+# How many times one checkpoint may be put to the oracle. Three is enough for
+# the shape this is for - a trigger phrase that recurs, like "tap Logout"
+# matching both the button and the confirm dialog - and low enough that a
+# pattern matching every turn cannot spend the run on one rung.
+DEFAULT_CHECKPOINT_POLLS = 3
 
 
 @dataclass(frozen=True)
@@ -99,6 +128,11 @@ class Budget:
     # paying for weight load and CUDA graph capture. Off by default to keep the
     # library loop a pure function of its replies; the CLI turns it on.
     warmup: bool = False
+    # A whole-run ceiling on checkpoint evaluations, above each rung's own
+    # `max_polls`. None means the per-rung caps are the only bound, which they
+    # already are: the worst case is their sum. It exists for the case with
+    # many rungs where that sum is more oracle time than the run is worth.
+    max_checkpoint_polls: int | None = None
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -110,6 +144,70 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+@dataclass
+class _Rung:
+    """One checkpoint, as the run is finding out about it.
+
+    Separate from the `CheckpointLike` it points at because that is the case -
+    the same object across every run of it - while this is what happened this
+    time.
+    """
+
+    spec: CheckpointLike
+    index: int
+    # None when the rung named no trigger, and also when the pattern would not
+    # compile. The second is recorded rather than raised: a bad pattern is a
+    # case that will not fire a rung, not a reason to write no run at all.
+    pattern: re.Pattern[str] | None = None
+    trigger_error: str | None = None
+    # The pattern matched something the actor said, whether or not a poll was
+    # then spent. `triggered: false` beside `met: false` is the difference
+    # between a rung that failed and a rung nobody looked at.
+    triggered: bool = False
+    met: bool = False
+    polls: int = 0
+    # Any usable verdict at all, including "no". This is what separates an
+    # agent that did not go through the state from a judge that never said.
+    answered: bool = False
+    # The kind of the last non-answer, so an unmet rung can say whether the
+    # transport died or the judge was unreadable.
+    kind: str | None = None
+    turn: int | None = None
+    screenshot: str | None = None
+    detail: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.spec.id,
+            "condition": self.spec.condition,
+            "after": self.spec.after,
+            "required": self.spec.required,
+            "met": self.met,
+            "triggered": self.triggered,
+            "polls": self.polls,
+            "turn": self.turn,
+            "screenshot": self.screenshot,
+            "detail": self.detail,
+        }
+        if self.trigger_error:
+            payload["trigger_error"] = self.trigger_error
+        return payload
+
+
+def _rungs(checkpoints: Sequence[CheckpointLike]) -> list[_Rung]:
+    """Compile each trigger once, at the start, where a failure is visible."""
+    built: list[_Rung] = []
+    for index, spec in enumerate(checkpoints):
+        rung = _Rung(spec=spec, index=index)
+        if spec.after:
+            try:
+                rung.pattern = re.compile(spec.after, re.IGNORECASE)
+            except re.error as exc:
+                rung.trigger_error = f"{spec.after!r} is not a valid pattern: {exc}"
+        built.append(rung)
+    return built
+
+
 def run(
     instruction: str,
     *,
@@ -119,6 +217,7 @@ def run(
     settings: Settings,
     out_dir: Path,
     budget: Budget,
+    checkpoints: Sequence[CheckpointLike] = (),
     on_turn: Callable[[dict[str, Any]], None] | None = None,
     on_check: Callable[[dict[str, Any]], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
@@ -129,6 +228,12 @@ def run(
     started = clock()
     turns: list[dict[str, Any]] = []
     checks: list[dict[str, Any]] = []
+    # Checkpoints qualify a success condition - they say how the run reached
+    # it, not whether it did - so without one there is nothing for them to
+    # qualify and they are not graded. `cases.py` refuses that combination at
+    # the door; this is the same rule for a caller who built a run by hand.
+    rungs = _rungs(checkpoints) if success else []
+    checkpoint_polls = 0
     history: list[tuple[bytes, str]] = []
     keys: list[str] = []
     actions = 0
@@ -169,6 +274,10 @@ def run(
             result["warmup_error"] = warmup_error
         if closed_app:
             result["closed_app"] = closed_app
+        # Only when the case named some. A run with no checkpoints writes the
+        # same `run.json` it wrote before they existed, key for key.
+        if rungs:
+            result["checkpoints"] = [rung.as_dict() for rung in rungs]
         write_json(out_dir / "run.json", result)
         return result
 
@@ -210,6 +319,7 @@ def run(
         screenshot: str,
         phase: CheckPhase,
         turn: int | None = None,
+        rung: _Rung | None = None,
     ) -> Check:
         # Every call gets the actor's own ceiling. There is no run-wide total
         # left to divide between the two questions and their retries, and
@@ -218,7 +328,7 @@ def run(
         outcome = verify(
             client,  # type: ignore[arg-type] - protocol-compatible test clients
             png,
-            success or "",
+            rung.spec.condition if rung is not None else (success or ""),
             settings.model_history_n,
             budget.verify_timeout_s or settings.model_timeout_s,
             max(1, budget.verify_attempts),
@@ -226,6 +336,14 @@ def run(
             phase=phase,
             turn=turn,
         )
+        if rung is not None:
+            # `verify` does not know cases exist, so the rung is attached to
+            # the verdict rather than asked for inside it. That keeps the two
+            # questions, the pairing and the inconclusive handling identical
+            # to every other check in the run.
+            outcome = replace(
+                outcome, checkpoint_id=rung.spec.id, checkpoint_index=rung.index
+            )
         record = outcome.as_dict()
         checks.append(record)
         # `run.json` is written only at finish. Keeping each check beside the
@@ -257,13 +375,113 @@ def run(
         """The oracle's non-answer, kept beside the verdict it did not change."""
         return f"{detail}; the oracle was inconclusive: {outcome.detail}"
 
+    def polls_left(rung: _Rung) -> bool:
+        """Whether this rung may be put to the oracle once more.
+
+        A non-answer counts. It cost two model calls and it looked at the same
+        screen, so not counting it is how one unreadable rung spends a run. It
+        does not count *against the agent* - an unanswered rung ends the run on
+        an oracle status, not on a failed task - which is the part of the
+        `outranks_verdict` reasoning that matters here.
+        """
+        if rung.polls >= max(1, rung.spec.max_polls):
+            return False
+        ceiling = budget.max_checkpoint_polls
+        return ceiling is None or checkpoint_polls < ceiling
+
+    def evaluate(rung: _Rung, png: bytes, *, screenshot: str, turn: int | None) -> None:
+        """Put one rung to the oracle, on the screen a named turn left behind."""
+        nonlocal checkpoint_polls
+        outcome = check(png, screenshot=screenshot, phase="checkpoint", turn=turn, rung=rung)
+        rung.polls += 1
+        checkpoint_polls += 1
+        if outcome.holds is None:
+            rung.kind = outcome.kind
+            rung.detail = outcome.detail
+            return
+        rung.answered = True
+        rung.kind = None
+        if outcome.holds:
+            rung.met = True
+            rung.turn = turn
+            rung.screenshot = screenshot
+            rung.detail = (
+                "the oracle confirmed this step"
+                + (f" after turn {turn}" if turn is not None else "")
+            )
+        else:
+            rung.detail = "the oracle looked and did not find this step"
+
+    def fires(rung: _Rung, narration: str | None, expectation: str | None) -> bool:
+        """Does what the actor said it was doing name this rung?
+
+        Its narration and its Expect line, not a turn number: two runs of the
+        same case diverge by turn 1 and never realign, so an index anchors to a
+        different screen in each. The self-report decides only *when to look*.
+        """
+        if rung.pattern is None:
+            return False
+        said = "\n".join(part for part in (narration, expectation) if part)
+        return bool(said) and rung.pattern.search(said) is not None
+
+    def cross(narration: str | None, expectation: str | None, png: bytes) -> None:
+        """Evaluate every unmet rung this turn named. Usually none, costing nothing."""
+        for rung in rungs:
+            if rung.met or not fires(rung, narration, expectation):
+                continue
+            # Recorded even when there is no poll left to spend: a rung whose
+            # trigger fired and whose budget ran out is a different failure
+            # from one nothing ever matched.
+            rung.triggered = True
+            if not polls_left(rung):
+                continue
+            evaluate(rung, png, screenshot=current_screenshot, turn=current_turn)
+
+    def passed(detail: str, png: bytes, *, screenshot: str, turn: int | None) -> dict[str, Any]:
+        """The success condition held. Did the run go through the named steps?
+
+        Any rung whose trigger never fired is asked once here, so that an
+        oddly-narrated turn is not the sole reason a step is reported missed.
+        A rung that did fire has already been measured and is not asked again.
+
+        The three outcomes below are the same split the rest of the runner
+        draws. A rung answered "no" is the agent's failure. A rung nobody could
+        get an answer about says nothing about the agent, and filing it as a
+        failed task would be the exact mistake `oracle_inconclusive` exists to
+        prevent - one run's dead transport reported as an agent that skipped a
+        step.
+        """
+        for rung in rungs:
+            if rung.met or rung.triggered or not polls_left(rung):
+                continue
+            evaluate(rung, png, screenshot=screenshot, turn=turn)
+        missed = [rung for rung in rungs if rung.spec.required and not rung.met]
+        if not missed:
+            return finish("verified", detail)
+        named = ", ".join(rung.spec.id for rung in missed)
+        unanswered = [rung for rung in missed if not rung.answered]
+        if any(rung.kind == INFRASTRUCTURE for rung in unanswered):
+            return finish(
+                "oracle_error",
+                f"{detail}, but no verdict ever arrived for: {named}",
+            )
+        if unanswered:
+            return finish(
+                "oracle_inconclusive",
+                f"{detail}, but the oracle never gave a usable answer for: {named}",
+            )
+        return finish(
+            CHECKPOINTS_INCOMPLETE,
+            f"{detail}, but the run never passed through: {named}",
+        )
+
     # Opt-in, and off unless APP_PACKAGE names something. A run that inherits
     # the last run's half-open dialog is measuring the previous test as much as
     # this one - but force-stopping by default cost more than it bought: every
     # run then began on the launcher, the agent spent turn 0 opening the app,
     # and the next screenshot caught it mid-draw. Closing happens before the
-    # entry screenshot, so what is captured and what the oracle checks first is
-    # the state the agent really starts in.
+    # entry screenshot, so what is captured is the state the agent really
+    # starts in.
     if settings.app_package:
         try:
             device.close_app(settings.app_package)
@@ -287,8 +505,8 @@ def run(
 
     # Paid once, deliberately, before anything is measured. Without it the
     # first call of the run absorbs weight load, torch.compile and CUDA graph
-    # capture - which is how the entry check became an unpaid warm-up that
-    # timed out doing the job.
+    # capture - which is how the run's first real call became an unpaid
+    # warm-up that timed out doing the job.
     if budget.warmup:
         warmup_started = clock()
         try:
@@ -300,15 +518,6 @@ def run(
         except Exception as exc:  # noqa: BLE001 - a warm-up must not end a run
             warmup_error = f"{type(exc).__name__}: {exc}"
         warmup_ms = round((clock() - warmup_started) * 1000, 2)
-
-    if success:
-        initial = check(
-            current_png,
-            screenshot=current_screenshot,
-            phase="entry",
-        )
-        if initial.holds is True:
-            return finish("verified", "success condition held before any action")
 
     index = 0
     while actions < budget.max_actions and waits < budget.max_waits:
@@ -430,7 +639,11 @@ def run(
 
             verify_name = f"verify_{index:03d}.png"
             try:
-                current_png, width, height = capture(verify_name)
+                # Settled, like every other frame the model is shown. This was
+                # the one screenshot a verdict is read from that was taken as a
+                # single shot, which made the most consequential check in the
+                # run the least defended against a half-drawn screen.
+                current_png, width, height = capture_settled(verify_name)
             except Exception as exc:  # noqa: BLE001
                 return finish("device_error", f"{type(exc).__name__}: {exc}")
             current_screenshot = verify_name
@@ -442,7 +655,12 @@ def run(
                 turn=current_turn,
             )
             if outcome.holds is True:
-                return finish("verified", f"oracle confirmed actor claim at turn {index}")
+                return passed(
+                    f"oracle confirmed actor claim at turn {index}",
+                    current_png,
+                    screenshot=current_screenshot,
+                    turn=current_turn,
+                )
             if outcome.holds is None:
                 return finish(oracle_status(outcome), outcome.detail)
             if record["actor_status"].lower() == "fail":
@@ -502,6 +720,12 @@ def run(
         current_screenshot = after_name
         current_turn = index
 
+        # Before the repetition check, so a rung the last turn crossed is
+        # recorded even when that turn is the one that ends the run. A turn
+        # matching no trigger costs nothing, which is the whole point: the
+        # oracle runs at the steps you named and nowhere else.
+        cross(parsed.narration, parsed.expectation, current_png)
+
         if parsed.action != "wait":
             keys.append(action_key(pixels, width, height))
             stuck = detect_stuck(keys)
@@ -514,7 +738,12 @@ def run(
                         turn=current_turn,
                     )
                     if outcome.holds is True:
-                        return finish("verified", "oracle confirmed success despite repetition")
+                        return passed(
+                            "oracle confirmed success despite repetition",
+                            current_png,
+                            screenshot=current_screenshot,
+                            turn=current_turn,
+                        )
                     if outcome.holds is None:
                         if outranks_verdict(outcome):
                             return finish(oracle_status(outcome), outcome.detail)
@@ -531,7 +760,12 @@ def run(
             turn=current_turn,
         )
         if outcome.holds is True:
-            return finish("verified", "oracle confirmed success on the final check")
+            return passed(
+                "oracle confirmed success on the final check",
+                current_png,
+                screenshot=current_screenshot,
+                turn=current_turn,
+            )
         if outcome.holds is None:
             if outranks_verdict(outcome):
                 return finish(oracle_status(outcome), outcome.detail)

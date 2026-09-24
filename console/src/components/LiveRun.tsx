@@ -200,14 +200,13 @@ export function LiveRun({
         checksSeen.current = next;
         setChecks(next);
         const newestTurn = turnsSeen.current.at(-1);
-        // On reconnect the server can replay an entry or earlier actor check
-        // after its turns. It is evidence, but it is not the newest evidence.
+        // On reconnect the server can replay an earlier actor check after its
+        // turns. It is evidence, but it is not the newest evidence.
         const isNewest =
           newestTurn === undefined ||
-          (check.phase !== "entry" &&
-            (check.turn === null ||
-              check.turn === undefined ||
-              check.turn >= newestTurn.index));
+          check.turn === null ||
+          check.turn === undefined ||
+          check.turn >= newestTurn.index;
         if (isNewest) {
           latestEvidence.current = { type: "check", index: next.length - 1 };
         }
@@ -387,10 +386,11 @@ export function LiveRun({
                   <span className="nums w-[22px] shrink-0 text-right text-[11px] text-faint">
                     C{index + 1}
                   </span>
-                  <span className="min-w-0 flex-1 text-[12px] text-text">
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-text">
                     Checker{" "}
                     <span className="text-dim">
-                      {(check.phase ?? "verification").replaceAll("_", " ")}
+                      {check.checkpoint_id ??
+                        (check.phase ?? "verification").replaceAll("_", " ")}
                     </span>
                   </span>
                   <span

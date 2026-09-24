@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { CaretLeft } from "@phosphor-icons/react";
-import type { Check, RunDetail as Detail, Turn } from "../api";
+import type { Check, Checkpoint, RunDetail as Detail, Turn } from "../api";
 import { clock, duration } from "../format";
 import { StatusBadge } from "./StatusBadge";
 
@@ -77,6 +77,100 @@ function OracleCheck({
         </p>
       )}
     </button>
+  );
+}
+
+/**
+ * The rungs of the case, and which of them the run went through.
+ *
+ * This is the view that answers "which step broke". A run that ends
+ * `checkpoints_incomplete` names the steps in one line of detail; here they
+ * are laid out with the turn each was decided at and the check that decided
+ * it, so the screen the judge looked at is one click away.
+ *
+ * Three states, not two. A step that was asked about and not found is an agent
+ * that did not pass through it. A step whose trigger never fired is nobody
+ * having looked at the right moment - the fix is the pattern, not the agent -
+ * and collapsing the two would hide exactly that distinction.
+ */
+function CheckpointRow({
+  rung,
+  onSelect,
+}: {
+  rung: Checkpoint;
+  /** Absent when no check on disk decided this rung. */
+  onSelect?: () => void;
+}) {
+  const met = rung.met === true;
+  // Only the trigger decides this. A rung nothing ever named still spends a
+  // poll on the sweep at the end of the run, so counting polls would report
+  // every never-fired rung as "not met" - which blames the agent for a
+  // pattern that never matched.
+  const looked = rung.triggered === true;
+  const verdict = met ? "met" : looked ? "not met" : "never fired";
+  const color = met
+    ? "var(--pass)"
+    : !looked
+      ? "var(--infra)"
+      : rung.required === false
+        ? "var(--faint)"
+        : "var(--agent)";
+
+  const body = (
+    <>
+      <span
+        className="step-node mt-[5px] size-[7px] shrink-0 rounded-full"
+        style={{
+          background: met ? color : "var(--canvas)",
+          boxShadow: met ? undefined : `inset 0 0 0 1px ${color}`,
+        }}
+        aria-hidden
+      />
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-baseline gap-x-2">
+          <span className="nums text-[12px] font-medium text-text">{rung.id}</span>
+          <span className="nums text-[11px] font-semibold" style={{ color }}>
+            {verdict}
+          </span>
+          {rung.required === false && (
+            <span className="text-[10.5px] text-faint">observational</span>
+          )}
+          {rung.turn !== null && rung.turn !== undefined && (
+            <span className="nums text-[10.5px] text-faint">turn {rung.turn}</span>
+          )}
+          {(rung.polls ?? 0) > 1 && (
+            <span className="nums text-[10.5px] text-faint">
+              {rung.polls} looks
+            </span>
+          )}
+        </span>
+        <span className="mt-0.5 block max-w-[72ch] text-[12px] leading-snug text-dim">
+          {rung.condition}
+        </span>
+        {!met && !looked && rung.after && (
+          <span className="nums mt-0.5 block text-[11px] text-faint">
+            nothing the agent said matched /{rung.after}/
+          </span>
+        )}
+        {rung.trigger_error && (
+          <span className="mt-0.5 block text-[11px]" style={{ color: "var(--infra)" }}>
+            {rung.trigger_error}
+          </span>
+        )}
+      </span>
+    </>
+  );
+
+  return onSelect ? (
+    <button
+      type="button"
+      onClick={onSelect}
+      className="row flex w-full items-start gap-2.5 rounded-md p-2 text-left transition-colors duration-150 hover:bg-hover"
+    >
+      {body}
+    </button>
+  ) : (
+    <div className="flex w-full items-start gap-2.5 p-2">{body}</div>
   );
 }
 
@@ -283,6 +377,34 @@ export function RunDetail({
             This run wrote no turns. It failed before the first model call,
             usually a device or configuration error.
           </p>
+        )}
+
+        {run.checkpoints.length > 0 && (
+          <div className="space-y-1 p-3">
+            <h3 className="text-[10px] uppercase tracking-wide text-faint">
+              Named steps
+            </h3>
+            {run.checkpoints.map((rung) => {
+              // The check that decided it: the one that found the step, or
+              // failing that the last time anyone looked.
+              const asked = run.checks
+                .map((check, index) => ({ check, index }))
+                .filter(({ check }) => check.checkpoint_id === rung.id);
+              const deciding =
+                asked.find(({ check }) => check.holds === true) ?? asked.at(-1);
+              return (
+                <CheckpointRow
+                  key={rung.id}
+                  rung={rung}
+                  onSelect={
+                    deciding && onSelectCheck
+                      ? () => onSelectCheck(deciding.index)
+                      : undefined
+                  }
+                />
+              );
+            })}
+          </div>
         )}
 
         {run.checks.length > 0 && (

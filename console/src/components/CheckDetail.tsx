@@ -76,6 +76,15 @@ export function CheckDetail({
           )}
           <h3 className="truncate text-[12px] font-semibold">
             Checker {index + 1}
+            {/* A checkpoint check is the only one that is not about the run's
+                success condition, so the header says which step it is about
+                rather than leaving two identical headers to be told apart by
+                their condition text. */}
+            {check.checkpoint_id && (
+              <span className="nums ml-1.5 font-normal text-dim">
+                {check.checkpoint_id}
+              </span>
+            )}
           </h3>
         </div>
         <span className="nums text-[11px] font-semibold" style={{ color }}>
@@ -116,7 +125,11 @@ export function CheckDetail({
           <p className="text-[12px] leading-relaxed text-dim">{check.detail}</p>
         )}
 
-        <Answer label="Success condition" value={check.condition} raw={check.raw} />
+        <Answer
+          label={check.checkpoint_id ? "Step condition" : "Success condition"}
+          value={check.condition}
+          raw={check.raw}
+        />
         <Answer
           label="Negated condition"
           value={check.negation}

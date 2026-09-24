@@ -86,6 +86,9 @@ class RunDetail:
     detail: str
     turns: list[dict[str, Any]]
     checks: list[dict[str, Any]]
+    # The named steps and whether the run went through them. Empty for every
+    # run recorded before checkpoints existed, and for every case without any.
+    checkpoints: list[dict[str, Any]] = field(default_factory=list)
     warmup_ms: float | None = None
     warmup_error: str | None = None
     artifacts: list[str] = field(default_factory=list)
@@ -97,6 +100,7 @@ class RunDetail:
                 "detail": self.detail,
                 "turns": self.turns,
                 "checks": self.checks,
+                "checkpoints": self.checkpoints,
                 "warmup_ms": self.warmup_ms,
                 "warmup_error": self.warmup_error,
                 "artifacts": self.artifacts,
@@ -224,6 +228,50 @@ def _summarize(run_id: str, run_dir: Path, result: dict[str, Any]) -> RunSummary
     )
 
 
+def _ladder(run_dir: Path, checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The rungs of a run that has not written `run.json` yet.
+
+    The same shape `finish()` writes, rebuilt from the case the run was started
+    with and the checks on disk so far, so a live run shows its ladder filling
+    rather than nothing at all until the end.
+
+    `triggered` here means "was asked", which this side of `run.json` is the
+    only evidence of a trigger there is. The two part company in one place: a
+    rung whose trigger fired with no polls left is recorded by the runner and
+    cannot be seen from here. That resolves the moment the run ends.
+    """
+    case = _load(run_dir / "case.json") or {}
+    specs = case.get("checkpoints")
+    if not isinstance(specs, list):
+        return []
+
+    rungs: list[dict[str, Any]] = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        rung_id = str(spec.get("id") or "")
+        asked = [check for check in checks if check.get("checkpoint_id") == rung_id]
+        met = next((check for check in asked if check.get("holds") is True), None)
+        rungs.append(
+            {
+                "id": rung_id,
+                "condition": str(spec.get("condition") or ""),
+                "after": spec.get("after"),
+                "required": bool(spec.get("required", True)),
+                "met": met is not None,
+                "triggered": bool(asked),
+                "polls": len(asked),
+                "turn": met.get("turn") if met else None,
+                "screenshot": met.get("screenshot") if met else None,
+                # Left to the run to write. The oracle's own justification is
+                # one click away on the check it came from, and putting it here
+                # would read as the runner's verdict on the rung.
+                "detail": "",
+            }
+        )
+    return rungs
+
+
 class RunStore:
     """Reads a runs directory, caching each summary against its mtime.
 
@@ -288,12 +336,15 @@ class RunStore:
                 if check is not None
             ]
             detail = "run.json was never written - this run did not reach the end"
+            checkpoints = _ladder(run_dir, checks)
             warmup_ms = warmup_error = None
         else:
             raw_turns = result.get("turns")
             turns = raw_turns if isinstance(raw_turns, list) else []
             raw_checks = result.get("checks")
             checks = raw_checks if isinstance(raw_checks, list) else []
+            raw_rungs = result.get("checkpoints")
+            checkpoints = raw_rungs if isinstance(raw_rungs, list) else []
             detail = str(result.get("detail", ""))
             warmup_ms = result.get("warmup_ms")
             warmup_error = result.get("warmup_error")
@@ -303,6 +354,7 @@ class RunStore:
             detail=detail,
             turns=[_decorate(t) for t in turns],
             checks=checks,
+            checkpoints=checkpoints,
             warmup_ms=warmup_ms,
             warmup_error=warmup_error,
             artifacts=sorted(

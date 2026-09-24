@@ -1,12 +1,49 @@
 {
   "id": "log-out-and-log-backin",
   "name": "Log-out and Log-backIn",
-  "instruction": "Navigate to the FYI app. Tap the profile icon in the bottom navbar, then tap Settings. Swipe down and tap Logout. Tap \"Join the movement\". Tap the +971 country code and search for United States. Enter the mobile number 2345678916 and tap the blue arrow. On the \"Confirm your phone number\" screen, enter 123456 \u2014 type it slowly. Wait for the \"Tell us about yourself\" screen, tap it, then tap the blue arrowmark once the profile picture is visible. Click on \"I understand if i lost my encryption....\" and click on next  a tutorial is gonna appear with just click on the middle 2 times",
-  "success": "1. User logs out from the FYI app \n2. User logs back into the FYI App and can see the chat screen and the navbar with AI, Chat, Projects and Profile",
+  "instruction": "Navigate to the FYI app. Tap the profile icon in the bottom navbar, then tap Settings. Swipe down and tap Logout. Tap \"Join the movement\". Tap the +971 country code and search for United States. Enter the mobile number 2345678916 and tap the blue arrow. On the \"Confirm your phone number\" screen, enter 123456 \u2014 type it slowly. Wait for the \"Tell us about yourself\" screen, tap it, then tap the blue arrowmark once the profile picture is visible. Click on \"I understand if i lost my encryption....\" and click on next  a tutorial is gonna appear \"Tap here to start a new conversation\". Click on the middle and \"in the main menu you can access chat projects and your profile\" click on the middle  and navigate to the project section. Tutorial are appearing one says \"tap here to create a new project\" Click on the middle \"long press the object for more options\" click on the middle",
+  "success": "the FYI chat screen is visible with the user signed back in, showing the AI, Chat, Projects and Profile items in the bottom navbar",
   "max_actions": 40,
   "max_waits": 12,
   "verify_timeout_s": null,
-  "warmup": true,
+  "warmup": false,
+  "checkpoints": [
+    {
+      "id": "logged-out",
+      "condition": "the screen shows \"Join the movement\"",
+      "after": null,
+      "required": true,
+      "max_polls": 3
+    },
+    {
+      "id": "tutorial",
+      "condition": "a tutorial tip reading \"Tap here to start a new conversation\" is visible",
+      "after": "i understand|encryption|new conversation|main menu|create a new project|long press|middle|cent(er|re)|tutorial|coach",
+      "required": false,
+      "max_polls": 3
+    },
+    {
+      "id": "tip-main-menu",
+      "condition": "a tutorial tip about the main menu - reaching chat, projects and your profile - is visible",
+      "after": null,
+      "required": false,
+      "max_polls": 3
+    },
+    {
+      "id": "tip-create-project",
+      "condition": "a tutorial tip reading \"Tap here to create a new project\" is visible",
+      "after": null,
+      "required": false,
+      "max_polls": 3
+    },
+    {
+      "id": "tip-long-press",
+      "condition": "a tutorial tip about long pressing an object for more options is visible",
+      "after": null,
+      "required": false,
+      "max_polls": 3
+    }
+  ],
   "created_at": "2026-09-16T13:11:06.606246Z",
-  "updated_at": "2026-09-21T07:40:20.717826Z"
+  "updated_at": "2026-09-23T10:56:11.100667Z"
 }

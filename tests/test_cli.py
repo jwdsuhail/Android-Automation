@@ -10,7 +10,12 @@ from typing import Any
 
 import pytest
 
-from android_runner.cli import _exit_code, _oracle_summary, _resolve_case
+from android_runner.cli import (
+    _checkpoint_summary,
+    _exit_code,
+    _oracle_summary,
+    _resolve_case,
+)
 
 
 
@@ -127,3 +132,84 @@ def test_no_warmup_turns_warmup_off_and_never_back_on(tmp_path: Path) -> None:
 def test_a_case_the_runner_could_not_honour_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="max_actions must be at least 1"):
         _resolve_case(_args(case=_write_case(tmp_path, max_actions=0)))
+
+
+def test_a_stored_case_carries_its_named_steps_to_the_run(tmp_path: Path) -> None:
+    """The terminal is the other way a case is run, and a step list is not
+    something anyone types at a shell - so there is no flag for it, and this
+    is the only path that has to carry them."""
+    case = _resolve_case(
+        _args(
+            case=_write_case(
+                tmp_path,
+                checkpoints=[
+                    {
+                        "id": "logged-out",
+                        "condition": "the login screen is visible",
+                        "after": "log ?out",
+                    }
+                ],
+            )
+        )
+    )
+    assert [rung.id for rung in case.checkpoints] == ["logged-out"]
+
+
+def test_a_run_typed_at_the_terminal_has_no_named_steps() -> None:
+    assert _resolve_case(_args(instruction="Explore Settings")).checkpoints == ()
+
+
+def test_the_footer_counts_the_ladder_and_keeps_the_two_misses_apart() -> None:
+    """One is a trigger pattern to fix, the other an agent. Merging them into
+    a single "missed" is the one thing the ladder exists not to do."""
+    ladder = _checkpoint_summary(
+        {
+            "checkpoints": [
+                {"id": "logged-out", "met": True, "triggered": True},
+                {"id": "editor-invited", "met": False, "triggered": True},
+                {"id": "coachmark", "met": False, "triggered": False},
+            ]
+        }
+    )
+    assert ladder == {
+        "met": 1,
+        "total": 3,
+        "missed": ["editor-invited"],
+        "never_triggered": ["coachmark"],
+    }
+
+
+def test_a_run_without_named_steps_writes_no_ladder() -> None:
+    assert _checkpoint_summary({"checks": []}) is None
+
+
+def test_the_footers_oracle_is_the_success_condition_not_a_step() -> None:
+    """A step resolved after the final check would otherwise become the
+    footer's verdict, answering a question nobody asked."""
+    summary = _oracle_summary(
+        {
+            "checks": [
+                {
+                    "holds": True,
+                    "kind": "ok",
+                    "condition": "success",
+                    "negation": "fail",
+                    "phase": "final",
+                    "raw": "",
+                    "negated_raw": "",
+                },
+                {
+                    "holds": False,
+                    "kind": "ok",
+                    "condition": "fail",
+                    "negation": "success",
+                    "phase": "checkpoint",
+                    "checkpoint_id": "coachmark",
+                    "raw": "",
+                    "negated_raw": "",
+                },
+            ]
+        }
+    )
+    assert summary is not None
+    assert summary["holds"] is True

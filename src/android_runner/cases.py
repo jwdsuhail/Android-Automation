@@ -23,7 +23,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from android_runner.runner import DEFAULT_MAX_ACTIONS, DEFAULT_MAX_WAITS, write_json
+from android_runner.runner import (
+    DEFAULT_CHECKPOINT_POLLS,
+    DEFAULT_MAX_ACTIONS,
+    DEFAULT_MAX_WAITS,
+    write_json,
+)
 
 # A case id is also a filename, so it is restricted to what is safe in one on
 # every platform, and checked rather than sanitised when it arrives from HTTP.
@@ -55,6 +60,92 @@ def slugify(name: str) -> str:
 
 
 @dataclass(frozen=True)
+class Checkpoint:
+    """One named step of the case, graded by the same oracle as `success`.
+
+    A success condition can only describe the final screen, so everything on
+    the way to it is graded by the actor's own account of what it did. That is
+    the self-report an independent judge exists to distrust: two runs on disk
+    were verified on a two-item condition whose first item - "the user logs
+    out" - is not visible on the screen that proved the second.
+
+    A checkpoint is the same two questions asked earlier, on a screen a named
+    turn left behind. It is not a second kind of verification and it does not
+    get its own grader.
+    """
+
+    id: str
+    # Phrased exactly like `success`: something visible on one screen. It is
+    # put to the oracle verbatim.
+    condition: str
+    # A case-insensitive regular expression matched against what the actor
+    # said it was doing - its narration and its Expect line. `None` means the
+    # rung has no trigger and is only asked once, at the end of the run.
+    #
+    # It is not a turn number. Two runs of the same case on disk diverge from
+    # turn 1 and never realign: turn 5 is "tap the red Logout button" in one
+    # and "tap JOIN THE MOVEMENT" in the other. What both contain is a turn
+    # whose narration says logout, so that is the anchor. The actor's
+    # self-report decides *when to look*; the oracle still decides what is
+    # true.
+    after: str | None = None
+    # False makes the rung observational: recorded, never able to hold back a
+    # pass. For a genuinely transient state that a run may legitimately miss.
+    required: bool = True
+    # How many times this one rung may be put to the oracle. A trigger that
+    # matches every turn is a pattern mistake, and this is what stops it from
+    # spending the run on one question.
+    max_polls: int = DEFAULT_CHECKPOINT_POLLS
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def validate(self) -> None:
+        if not SLUG.match(self.id):
+            raise ValueError(
+                f"checkpoint id {self.id!r} must be lowercase letters, digits "
+                "and single hyphens"
+            )
+        if not self.condition.strip():
+            raise ValueError(
+                f"checkpoint {self.id!r} must describe a visible condition"
+            )
+        if self.after is not None:
+            if not self.after.strip():
+                raise ValueError(
+                    f"checkpoint {self.id!r}: leave `after` out entirely to "
+                    "check the rung once at the end of the run"
+                )
+            try:
+                re.compile(self.after)
+            except re.error as exc:
+                # Named here rather than at run time on the device, where it
+                # would surface twenty minutes into an emulator session.
+                raise ValueError(
+                    f"checkpoint {self.id!r}: {self.after!r} is not a valid "
+                    f"regular expression: {exc}"
+                ) from exc
+        if self.max_polls < 1:
+            raise ValueError(f"checkpoint {self.id!r}: max_polls must be at least 1")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> Checkpoint:
+        if not isinstance(payload, dict):
+            raise ValueError("a checkpoint must be a JSON object")
+        after = payload.get("after")
+        name = str(payload.get("name") or "")
+        checkpoint = cls(
+            id=str(payload.get("id") or "") or slugify(name),
+            condition=str(payload.get("condition") or ""),
+            after=None if after is None else str(after),
+            required=bool(payload.get("required", True)),
+            max_polls=_int(payload, "max_polls", DEFAULT_CHECKPOINT_POLLS),
+        )
+        checkpoint.validate()
+        return checkpoint
+
+
+@dataclass(frozen=True)
 class Case:
     """One runnable task. Field-for-field, the arguments of `model-run`."""
 
@@ -70,11 +161,20 @@ class Case:
     # library loop stays a pure function of its replies, while a saved case is
     # something a person runs and should not pay the first-call weight load.
     warmup: bool = True
+    # The named steps on the way to `success`, graded by the same oracle. An
+    # empty tuple is every case written before this existed, and the runner
+    # behaves for it exactly as it did then.
+    checkpoints: tuple[Checkpoint, ...] = ()
     created_at: str = ""
     updated_at: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # `asdict` rebuilds the tuple as a tuple. JSON has one sequence, and a
+        # caller comparing this against a decoded file should not have to know
+        # which side it is holding.
+        payload["checkpoints"] = [dict(c) for c in payload["checkpoints"]]
+        return payload
 
     def validate(self) -> None:
         """Raise ValueError on anything the runner could not honour.
@@ -103,6 +203,22 @@ class Case:
             raise ValueError("max_waits must be at least 1")
         if self.verify_timeout_s is not None and self.verify_timeout_s <= 0:
             raise ValueError("verify_timeout_s must be greater than 0")
+        seen: set[str] = set()
+        for checkpoint in self.checkpoints:
+            checkpoint.validate()
+            if checkpoint.id in seen:
+                # Two rungs under one id are one rung in every artifact that
+                # reports them, and the run would read as having crossed a step
+                # it skipped.
+                raise ValueError(f"two checkpoints share the id {checkpoint.id!r}")
+            seen.add(checkpoint.id)
+        if self.checkpoints and not self.success:
+            # Checkpoints qualify a pass, and an exploration run has none to
+            # qualify. Silently grading rungs nothing reads would be worse.
+            raise ValueError(
+                "checkpoints need a success condition: they say how the run "
+                "reached it, not whether it did"
+            )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], *, id: str | None = None) -> Case:
@@ -135,11 +251,22 @@ class Case:
             max_waits=_int(payload, "max_waits", DEFAULT_MAX_WAITS),
             verify_timeout_s=None if verify is None else _float(payload, "verify_timeout_s", 0.0),
             warmup=bool(payload.get("warmup", True)),
+            checkpoints=_checkpoints(payload),
             created_at=str(payload.get("created_at") or "") or _now(),
             updated_at=str(payload.get("updated_at") or "") or _now(),
         )
         case.validate()
         return case
+
+
+def _checkpoints(payload: dict[str, Any]) -> tuple[Checkpoint, ...]:
+    """The rungs, in the order they were written. Absent is the same as none."""
+    raw = payload.get("checkpoints")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("checkpoints must be a list")
+    return tuple(Checkpoint.from_dict(item) for item in raw)
 
 
 def _int(payload: dict[str, Any], key: str, fallback: int) -> int:

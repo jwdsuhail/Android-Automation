@@ -15,7 +15,10 @@ INFRASTRUCTURE = "infrastructure"
 # same answer to the predicate and its complement. The judge, not the network.
 INCONCLUSIVE = "inconclusive"
 OK = "ok"
-CheckPhase = Literal["entry", "actor_claim", "stuck", "final"]
+# `checkpoint` is the only phase that names a step rather than an ending: the
+# same two questions, asked about a rung of the case on the screen a named turn
+# left behind. Every other phase is a place the run can stop.
+CheckPhase = Literal["actor_claim", "stuck", "final", "checkpoint"]
 
 
 def _label(holds: bool | None) -> str | None:
@@ -30,7 +33,7 @@ def _label(holds: bool | None) -> str | None:
 @dataclass(frozen=True)
 class Check:
     # The exact visual evidence judged, and why the judge was called. `turn`
-    # is absent only for entry (or a final check reached before any turn).
+    # is absent only for a final check reached before any turn.
     screenshot: str
     phase: CheckPhase
     turn: int | None
@@ -54,6 +57,11 @@ class Check:
     # every run on disk and the console already read.
     condition: str | None = None
     negation: str | None = None
+    # Which rung of the case this check was asked about, when it was asked
+    # about one. `verify()` never sets these - it does not know cases exist -
+    # so the runner attaches them to the verdict it gets back.
+    checkpoint_id: str | None = None
+    checkpoint_index: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +75,8 @@ class Check:
             "errors": list(self.errors),
             "condition": self.condition,
             "negation": self.negation,
+            "checkpoint_id": self.checkpoint_id,
+            "checkpoint_index": self.checkpoint_index,
             "raw": self.raw[:1200],
             "negated_raw": self.negated_raw[:1200],
         }
@@ -98,6 +108,11 @@ def _ask(
     the second call returns the first call's answer. A verdict is never retried
     at all - asking again until the answer changes is best-of-N dressed up as
     verification.
+
+    `bare_arguments` is passed because the judge routinely omits the
+    `mobile_use` envelope around an otherwise perfect answer. Reading it is not
+    a relaxed standard - the verdict is the same verdict - and refusing it was
+    throwing away every check in two runs on disk.
     """
     messages = qwen_vl.build_messages(
         question, png, [], history_n, thinking=False, reflection=False, oracle=True
@@ -111,7 +126,9 @@ def _ask(
             errors.append(completion.error)
             continue
         try:
-            parsed = qwen_vl.parse(completion.raw, completion.reasoning)
+            parsed = qwen_vl.parse(
+                completion.raw, completion.reasoning, bare_arguments=True
+            )
         except ValueError as exc:
             return _Answer(None, raw, str(exc), INCONCLUSIVE, attempt, tuple(errors))
         if parsed.action != "terminate":

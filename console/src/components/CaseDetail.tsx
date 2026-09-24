@@ -114,6 +114,38 @@ export function CaseDetail({
           </p>
         )}
 
+        {item.checkpoints?.length > 0 && (
+          <>
+            <h3 className="mt-5 text-[11px] font-medium text-faint">
+              Named steps
+            </h3>
+            <ul className="mt-1.5 max-w-[68ch] space-y-2">
+              {item.checkpoints.map((step) => (
+                <li key={step.id}>
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <span className="nums text-[12px] font-medium text-text">
+                      {step.id}
+                    </span>
+                    {!step.required && (
+                      <span className="text-[10.5px] text-faint">
+                        observational
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[12px] leading-relaxed text-dim">
+                    {step.condition}
+                  </p>
+                  <p className="nums text-[11px] text-faint">
+                    {step.after
+                      ? `after a turn matching /${step.after}/`
+                      : "checked once, at the end of the run"}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+
         <h3 className="mt-5 text-[11px] font-medium text-faint">Budgets</h3>
         <div className="mt-1">
           <Detail label="Actions" value={String(item.max_actions)} />

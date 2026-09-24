@@ -80,14 +80,44 @@ export interface Check {
   raw: string;
   negated_raw: string;
   screenshot?: string | null;
-  phase?: "entry" | "actor_claim" | "stuck" | "final" | string;
+  phase?: "actor_claim" | "stuck" | "final" | "checkpoint" | string;
   turn?: number | null;
+  /* Set only on a `checkpoint` check: which rung of the case it was asked
+     about. The oracle does not know cases exist; the runner attaches these to
+     the verdict it gets back. */
+  checkpoint_id?: string | null;
+  checkpoint_index?: number | null;
+}
+
+/** One named step on the way to `success`, graded by the same oracle.
+
+    Written on a case; read back on a run with `met` and the rest filled in by
+    the run that crossed it - or did not. */
+export interface Checkpoint {
+  id: string;
+  condition: string;
+  /* A case-insensitive pattern matched against what the actor said it was
+     doing. Null means the rung is asked once, at the end of the run. */
+  after: string | null;
+  required: boolean;
+  max_polls?: number;
+  /* Everything below is the run's account of the rung, absent on a case. */
+  met?: boolean;
+  triggered?: boolean;
+  polls?: number;
+  turn?: number | null;
+  screenshot?: string | null;
+  detail?: string;
+  trigger_error?: string;
 }
 
 export interface RunDetail extends RunSummary {
   detail: string;
   turns: Turn[];
   checks: Check[];
+  /* Empty for a case with no named steps, and for every run recorded before
+     they existed. */
+  checkpoints: Checkpoint[];
   warmup_ms: number | null;
   warmup_error: string | null;
   artifacts: string[];
@@ -102,6 +132,7 @@ export interface Case {
   max_waits: number;
   verify_timeout_s: number | null;
   warmup: boolean;
+  checkpoints: Checkpoint[];
   created_at: string;
   updated_at: string;
 }

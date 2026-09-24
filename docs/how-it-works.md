@@ -121,27 +121,12 @@ One throwaway model call, carrying a **real screenshot** so it travels the same
 downscale path and produces the same image-token count as a live turn.
 
 This exists because the first call of a run otherwise absorbs model weight load,
-`torch.compile` and CUDA graph capture. That is how the entry check once became
-an unpaid warm-up that timed out doing the job. In a measured run, warm-up took
+`torch.compile` and CUDA graph capture. That is how the run's first real call
+once became an unpaid warm-up that timed out doing the job. In a measured run,
+warm-up took
 **13.4 seconds** while ordinary turns took ~5.7s.
 
-### 3.4 The entry check — a guard, not a verdict
-
-If a success condition was given, the oracle is asked **before any action**:
-is this already true?
-
-If yes, the run finishes immediately as `verified` with the detail *"success
-condition held before any action"* — which is an honest and important result. It
-means the test proved nothing about the agent, because the task was already
-done.
-
-If no — the normal case — the run proceeds. **An entry check that fails to
-produce a usable answer does not stop the run.** It is a guard phase; only
-`actor_claim`, `stuck` and `final` set the verdict. This is why you can see a
-run marked green `verified` whose *first* checker says `inconclusive`. Nothing
-went wrong.
-
-### 3.5 The turn loop
+### 3.4 The turn loop
 
 Bounded by two separate budgets — `--max-actions` (default 20) and
 `--max-waits` (default 12). **Nothing caps a run by elapsed time.** There used
@@ -172,10 +157,12 @@ Each turn:
     when any single tile exceeds 2.5%, which catches a menu opening in one
     corner that a whole-screen mean would average away.
 11. **Write `turn_NNN.json`** and stream it to any listener.
-12. **Compose the next turn's note** (Section 5.4).
-13. **Check for repetition** (Section 5.8).
+12. **Test the turn's narration against any named steps** (Section 3.7). A turn
+    that matches nothing costs nothing, which is the whole point.
+13. **Compose the next turn's note** (Section 5.4).
+14. **Check for repetition** (Section 5.8).
 
-### 3.6 How a run ends
+### 3.5 How a run ends
 
 | Status | Meaning | Exit | `error_class` |
 |---|---|---|---|
@@ -185,6 +172,7 @@ Each turn:
 | `budget_exhausted` | Ran out of actions or waits | 1 | `agent` |
 | `parse_error` | The reply could not be read | 1 | `agent` |
 | `actor_claimed_success` | Claimed success with no condition to check | 1 | `agent` |
+| `checkpoints_incomplete` | The condition held, but a required step was never crossed | 1 | `agent` |
 | `device_error` | ADB failed | 2 | `infrastructure` |
 | `model_error` | The server failed | 2 | `infrastructure` |
 | `oracle_error` | No verdict arrived — transport failed | 2 | `infrastructure` |
@@ -201,7 +189,13 @@ server. The second is the judge: a reply arrived and was unusable, and the fix i
 the grading prompt. Filing the second under infrastructure sent people to restart
 a server that was working fine.
 
-### 3.7 When the actor claims success
+A run whose success condition held but whose named steps did not is the one new
+row. It is `agent`, and deliberately so: the harness worked, the judge answered,
+and the agent did not pass through a state the case requires. A step nobody
+could get an answer about is not filed there — it exits 2 on an oracle status,
+because a judge that would not speak says nothing about the agent.
+
+### 3.6 When the actor claims success
 
 It does not end the run. The runner takes a fresh screenshot (`verify_NNN.png`)
 and asks the oracle:
@@ -217,6 +211,52 @@ a verdict the run had already reached.** A run that ended `stuck` keeps that
 status and records the non-answer in `detail`. Only `oracle_error` — nothing
 measured at all — replaces it. This was a real bug: a correct `stuck` detection
 was once relabelled as a broken harness.
+
+### 3.7 Named steps — the same oracle, at a few named turns
+
+Every phase above judges a screen that *ends* the run. Everything before the
+end is graded by the agent's own `Check:` line — the
+self-report the independent judge exists to distrust. Three failures on disk,
+all in runs recorded `verified`:
+
+- **A conjunction graded by its most visible half.** Two runs of the log-out
+  case verified on "1. User logs out 2. User logs back in". The oracle's own
+  justification cites only item 2, and item 1 cannot be evidenced on a screen
+  showing a signed-in user.
+- **A step skipped entirely.** A nine-step instruction whose condition named
+  only the last step. No turn performs the "invite Test 14 as editor" step; at
+  turn 11 the agent observes it is already done. Eight of nine steps ungraded.
+- **Transient conditions, unfalsifiable at the end.** Four of five items in one
+  case were tutorial coachmarks, each shown once and dismissed by the next tap.
+  No final screen can show them.
+
+A checkpoint is the same two questions, asked earlier, on the settled screen a
+named turn left behind:
+
+```json
+{ "id": "logged-out", "condition": "the signed-out screen is visible",
+  "after": "log\\s*-?\\s*out", "required": true, "max_polls": 3 }
+```
+
+**The trigger is a pattern, not a turn number.** Comparing two runs of one case
+turn by turn, the paths diverge at turn 1 and never realign: turn 5 is "tap the
+red Logout button" in one and "tap JOIN THE MOVEMENT" in the other. What both
+contain is a turn whose narration says logout. So the actor's self-report
+decides *when to look*, and the oracle still decides what is true — the
+self-report is never the evidence.
+
+The outcomes reuse the semantics already in the runner. `holds True` meets the
+step, which is then never asked again. `holds False` leaves it unmet and spends
+one poll, so a pattern matching both "Tap Logout" and the confirm dialog's
+button re-checks on its own. `holds None` records the non-answer and cannot make
+the step a failure of the agent. A step whose trigger never fires is asked once
+beside the final check, and the record keeps `triggered: false` so a pattern to
+fix stays distinguishable from an agent to fix.
+
+The cost is bounded by the number of steps, not the number of turns: five steps
+resolving on the first trigger is ten extra oracle calls, roughly +60s on a 280s
+run. Polling every frame that moved — 78% of them — would have added 46–50 calls
+to three real runs, roughly doubling them. That design is the one this rejects.
 
 ---
 
@@ -493,7 +533,7 @@ browser a URL immediately.
 | `turn_NNN.after.png` | After execute | The settled result |
 | `turn_NNN.json` | End of turn | The full turn record |
 | `verify_NNN.png` | On a success claim | The exact frame the oracle graded |
-| `check_NNN.json` | Per oracle call | One verdict, both raw answers |
+| `check_NNN.json` | Per oracle call | One verdict, both raw answers; a checkpoint check names its step |
 | `run.json` | At the end | The complete result, turns and checks embedded |
 | `console.log` | Live, by the console | The child's stdout and stderr |
 
@@ -606,9 +646,18 @@ Worth saying out loud rather than being asked:
 
 - **Repetition detection ignores screen change** (5.8), so an overlay that
   swallows taps is scored as an agent failure.
-- **The parser is strict about the tool-call envelope.** The oracle intermittently
-  emits a bare arguments object instead of the full `{"name": ..., "arguments":
-  ...}` wrapper, and the reply is rejected even though its verdict was correct.
+- **The parser is strict about the tool-call envelope, for the actor.** The
+  oracle intermittently emits a bare arguments object instead of the full
+  `{"name": ..., "arguments": ...}` wrapper; that shape is now read for the
+  grader, which returns one bit and touches nothing. The actor keeps the strict
+  contract: it is driving a device, and a reply whose shape is in doubt is a
+  reply whose target is in doubt.
+- **A condition true only between two settled screenshots is never
+  photographed.** Naming the step (3.7) narrows this a great deal against fixed
+  turn numbers, but cannot close it: a tutorial coachmark is visible between two
+  taps and gone by the next settled frame. `required: false` exists for exactly
+  those, so a good run is not downgraded by the camera. It is the same blind
+  spot as 5.8 reading a coachmark tour as repetition.
 - **`APP_PACKAGE` is unset by default**, so app state carries from one run into
   the next. Good for speed, bad for isolation — and it is why a tutorial from an
   earlier run's signup can appear at the start of the next one.

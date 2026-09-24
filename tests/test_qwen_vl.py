@@ -492,3 +492,49 @@ def test_a_missing_action_without_a_status_is_still_rejected() -> None:
 def test_a_nonsense_status_is_not_inferred_as_terminate() -> None:
     with pytest.raises(ValueError, match="unsupported action"):
         qwen_vl.parse(call({"status": "maybe"}))
+
+
+# The reply below is verbatim from runs/20260922T092851Z/check_000.json, where
+# the check died with "expected tool name mobile_use, got None". The
+# judge reasoned, wrote its Action line, and emitted the arguments object with
+# no envelope around it. The verdict existed; the harness could not hear it.
+BARE = (
+    "Action: The screen is the home screen with no chat or project-sent "
+    'confirmation visible.\n[tool_call]\n{"action": "terminate", "status": '
+    '"fail"}\n[/tool_call]'
+)
+
+
+def test_an_unwrapped_verdict_is_read_when_the_grader_asks_for_it() -> None:
+    parsed = qwen_vl.parse(BARE, bare_arguments=True)
+    assert parsed.action == "terminate"
+    assert parsed.arguments["status"] == "fail"
+
+
+def test_the_actor_still_refuses_an_unwrapped_reply() -> None:
+    """It is driving a device: a reply whose shape is in doubt is a reply whose
+    target is in doubt. The oracle returns one bit and touches nothing, which
+    is the whole reason only it gets the looser reading."""
+    with pytest.raises(ValueError, match="expected tool name mobile_use"):
+        qwen_vl.parse(BARE)
+
+
+def test_a_payload_naming_another_tool_is_refused_either_way() -> None:
+    """The relaxation is for a missing envelope, not a wrong one."""
+    raw = (
+        "<tool_call>"
+        + json.dumps({"name": "computer_use", "arguments": {"action": "click"}})
+        + "</tool_call>"
+    )
+    with pytest.raises(ValueError, match="expected tool name mobile_use"):
+        qwen_vl.parse(raw, bare_arguments=True)
+
+
+def test_an_unwrapped_payload_that_names_no_action_is_still_refused() -> None:
+    """Narrow, like the missing-action inference beside it: a payload with no
+    action and no verdict in it is not an arguments object that lost its
+    wrapper, it is a reply nobody can act on."""
+    with pytest.raises(ValueError, match="expected tool name mobile_use"):
+        qwen_vl.parse(
+            '<tool_call>{"text": "I am done"}</tool_call>', bare_arguments=True
+        )

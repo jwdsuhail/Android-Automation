@@ -205,3 +205,103 @@ def test_the_stream_replays_a_finished_run_then_ends(tmp_path: Path) -> None:
 
 def test_the_stream_404s_for_a_run_that_does_not_exist(tmp_path: Path) -> None:
     assert client(tmp_path).get("/api/runs/nope/events").status_code == 404
+
+
+def test_named_steps_survive_the_round_trip(tmp_path: Path) -> None:
+    api = client(tmp_path)
+    created = api.post(
+        "/api/cases",
+        json={
+            **BODY,
+            "checkpoints": [
+                {
+                    "id": "logged-out",
+                    "condition": "the login screen is visible",
+                    "after": "log ?out",
+                },
+                {
+                    "id": "coachmark",
+                    "condition": "the tip is visible",
+                    "required": False,
+                },
+            ],
+        },
+    )
+    assert created.status_code == 201
+    rungs = created.json()["checkpoints"]
+    assert [r["id"] for r in rungs] == ["logged-out", "coachmark"]
+    assert rungs[0]["after"] == "log ?out"
+    assert (rungs[1]["after"], rungs[1]["required"]) == (None, False)
+
+    fetched = api.get("/api/cases/audio-metadata").json()
+    assert fetched["checkpoints"][0]["max_polls"] == 3
+
+
+def test_a_case_without_named_steps_reports_an_empty_list(tmp_path: Path) -> None:
+    """The console renders the ladder from this, so a missing key would be a
+    crash in the one view that says which step broke."""
+    api = client(tmp_path)
+    assert api.post("/api/cases", json=BODY).json()["checkpoints"] == []
+
+
+def test_a_step_the_runner_could_not_honour_is_refused_before_the_device(
+    tmp_path: Path,
+) -> None:
+    api = client(tmp_path)
+    refused = api.post(
+        "/api/cases",
+        json={
+            **BODY,
+            "checkpoints": [
+                {"id": "logged-out", "condition": "x", "after": "log(out"}
+            ],
+        },
+    )
+    assert refused.status_code == 422
+    assert "not a valid regular expression" in refused.json()["detail"]
+
+
+def _with_a_step(api: TestClient) -> dict[str, Any]:
+    return api.post(
+        "/api/cases",
+        json={
+            **BODY,
+            "checkpoints": [
+                {
+                    "id": "logged-out",
+                    "condition": "the login screen is visible",
+                    "after": "log ?out",
+                }
+            ],
+        },
+    ).json()
+
+
+def test_a_client_that_never_heard_of_named_steps_does_not_delete_them(
+    tmp_path: Path,
+) -> None:
+    """A console process started before named steps existed keeps serving the
+    bundle and the `Case` it imported at boot. Saving through it sent a payload
+    with no `checkpoints` key at all, and a plain replace read that as "remove
+    the five steps" - which is what it did to a real case file."""
+    api = client(tmp_path)
+    _with_a_step(api)
+
+    saved = api.put(
+        "/api/cases/audio-metadata",
+        json={**BODY, "success": "an edit made by an older console"},
+    )
+    assert saved.status_code == 200
+    assert [r["id"] for r in saved.json()["checkpoints"]] == ["logged-out"]
+    assert saved.json()["success"] == "an edit made by an older console"
+
+
+def test_an_empty_list_still_clears_the_named_steps(tmp_path: Path) -> None:
+    """The rule is about silence, not about emptiness. The form always sends
+    the key, so removing every step in it has to keep working."""
+    api = client(tmp_path)
+    _with_a_step(api)
+
+    saved = api.put("/api/cases/audio-metadata", json={**BODY, "checkpoints": []})
+    assert saved.status_code == 200
+    assert saved.json()["checkpoints"] == []

@@ -195,9 +195,9 @@ def test_an_unfinished_run_reads_incremental_checks(tmp_path: Path) -> None:
     run_dir = tmp_path / "20260908T164612Z"
     write_turns(run_dir, [CLICK])
     check = {
-        "screenshot": "entry.png",
-        "phase": "entry",
-        "turn": None,
+        "screenshot": "turn_000.after.png",
+        "phase": "final",
+        "turn": 0,
         "holds": False,
     }
     (run_dir / "check_000.json").write_text(json.dumps(check), encoding="utf-8")
@@ -268,3 +268,83 @@ def test_delete_drops_the_cached_summary_with_the_directory(tmp_path: Path) -> N
     assert store.delete("20260914T121427Z") is True
     assert store.summary("20260914T121427Z") is None
     assert store.summaries() == []
+
+
+# --- the checkpoint ladder ------------------------------------------------
+
+
+def test_the_ladder_is_read_from_a_finished_run(tmp_path: Path) -> None:
+    run_dir = complete_run(tmp_path, "20260914T121427Z")
+    result = json.loads((run_dir / "run.json").read_text())
+    result["checkpoints"] = [
+        {"id": "logged-out", "condition": "the login screen", "met": True}
+    ]
+    (run_dir / "run.json").write_text(json.dumps(result), encoding="utf-8")
+
+    detail = RunStore(tmp_path).detail("20260914T121427Z")
+    assert detail is not None
+    assert detail.as_dict()["checkpoints"][0]["id"] == "logged-out"
+
+
+def test_a_run_from_before_checkpoints_has_an_empty_ladder(tmp_path: Path) -> None:
+    """Every run already on disk. The key is absent, not false, so the reader
+    supplies the empty list the console can render without a special case."""
+    complete_run(tmp_path, "20260914T121427Z")
+    detail = RunStore(tmp_path).detail("20260914T121427Z")
+    assert detail is not None
+    assert detail.as_dict()["checkpoints"] == []
+
+
+def test_a_live_run_shows_its_ladder_filling(tmp_path: Path) -> None:
+    """`run.json` is written once, at the end. Without this the ladder - the
+    one view that answers "which step broke" - would appear only after the
+    run it was being watched for is over."""
+    run_dir = tmp_path / "20260914T121427Z"
+    write_turns(run_dir, [CLICK])
+    (run_dir / "case.json").write_text(
+        json.dumps(
+            {
+                "name": "Log out",
+                "instruction": "log out and back in",
+                "success": "the chat screen is visible",
+                "checkpoints": [
+                    {"id": "logged-out", "condition": "the login screen", "after": "log ?out"},
+                    {"id": "coachmark", "condition": "the tip is visible", "required": False},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "check_000.json").write_text(
+        json.dumps(
+            {
+                "phase": "checkpoint",
+                "checkpoint_id": "logged-out",
+                "holds": True,
+                "turn": 3,
+                "screenshot": "turn_003.after.png",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    detail = RunStore(tmp_path).detail("20260914T121427Z")
+    assert detail is not None
+    rungs = detail.as_dict()["checkpoints"]
+    assert [r["id"] for r in rungs] == ["logged-out", "coachmark"]
+    assert (rungs[0]["met"], rungs[0]["turn"], rungs[0]["polls"]) == (True, 3, 1)
+    assert rungs[0]["screenshot"] == "turn_003.after.png"
+    # Not yet asked, which is not the same as asked and not found.
+    assert (rungs[1]["met"], rungs[1]["triggered"], rungs[1]["required"]) == (
+        False,
+        False,
+        False,
+    )
+
+
+def test_a_live_run_without_a_case_file_has_no_ladder(tmp_path: Path) -> None:
+    """A run typed straight into the terminal, and every run on disk today."""
+    write_turns(tmp_path / "20260914T121427Z", [CLICK])
+    detail = RunStore(tmp_path).detail("20260914T121427Z")
+    assert detail is not None
+    assert detail.as_dict()["checkpoints"] == []

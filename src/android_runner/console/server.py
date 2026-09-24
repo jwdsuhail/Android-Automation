@@ -263,6 +263,12 @@ def create_app(
             # and every run that recorded it still points at something.
             merged = dict(payload)
             merged["created_at"] = existing.created_at if existing else ""
+            # A PUT replaces, but a client that has never heard of named steps
+            # omits them rather than meaning "delete them" - and a console left
+            # running from before they existed is exactly such a client. An
+            # explicit [] still clears them; only silence is treated as silence.
+            if "checkpoints" not in merged and existing is not None:
+                merged["checkpoints"] = [rung.as_dict() for rung in existing.checkpoints]
             return cases.save(Case.from_dict(merged, id=case_id)).as_dict()
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc

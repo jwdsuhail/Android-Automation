@@ -44,6 +44,12 @@ def _print_turn(turn: dict[str, object]) -> None:
 
 def _print_check(check: dict[str, object]) -> None:
     """Show the judge's two answers, not only that they failed to pair."""
+    rung = check.get("checkpoint_id")
+    if rung:
+        # Named on its own line above the verdict, because a checkpoint check
+        # reads as a mysterious extra oracle call otherwise: the condition it
+        # asked about is not the run's success condition.
+        print(f"     checkpoint: {rung}", file=sys.stderr, flush=True)
     holds = check.get("holds")
     if holds is True:
         label = "pass"
@@ -68,11 +74,24 @@ def _print_check(check: dict[str, object]) -> None:
 
 
 def _oracle_summary(result: dict[str, Any]) -> dict[str, Any] | None:
-    """The last check, compacted for the JSON footer."""
+    """The last check of the success condition, compacted for the JSON footer.
+
+    Not simply the last check: a checkpoint check asks about a rung of the
+    case, so letting one be the footer's "oracle" would answer a question
+    nobody asked - and it would be the last check on every run whose final
+    rung was resolved after the success condition.
+    """
     checks = result.get("checks")
     if not isinstance(checks, list) or not checks:
         return None
-    last = checks[-1]
+    verdicts = [
+        check
+        for check in checks
+        if isinstance(check, dict) and check.get("phase") != "checkpoint"
+    ]
+    if not verdicts:
+        return None
+    last = verdicts[-1]
     if not isinstance(last, dict):
         return None
     payload = {
@@ -85,6 +104,29 @@ def _oracle_summary(result: dict[str, Any]) -> dict[str, Any] | None:
         "negation_said": action_said(last.get("negated_raw")),
     }
     return payload
+
+
+def _checkpoint_summary(result: dict[str, Any]) -> dict[str, Any] | None:
+    """The ladder, compacted: how many rungs were crossed and which were not."""
+    rungs = result.get("checkpoints")
+    if not isinstance(rungs, list) or not rungs:
+        return None
+    met = [rung for rung in rungs if rung.get("met")]
+    return {
+        "met": len(met),
+        "total": len(rungs),
+        # A rung nobody looked at and a rung that was looked at and missed are
+        # two different bugs - one is the trigger pattern, one is the agent -
+        # so the footer never merges them into "missed".
+        "missed": [
+            rung.get("id") for rung in rungs if not rung.get("met") and rung.get("triggered")
+        ],
+        "never_triggered": [
+            rung.get("id")
+            for rung in rungs
+            if not rung.get("met") and not rung.get("triggered")
+        ],
+    }
 
 
 def _exit_code(result: dict[str, Any]) -> int:
@@ -141,6 +183,11 @@ def _resolve_case(args: argparse.Namespace) -> Case:
         # `--no-warmup` can only ever turn warm-up off, never back on, so a case
         # that stored `warmup: false` stays off without the flag.
         warmup=(stored.warmup if stored else True) and not args.no_warmup,
+        # Only ever from the file. A list of rungs, each with a condition and a
+        # trigger pattern, is not something anyone types at a shell, and a flag
+        # that could only half-express one would be a worse way to write them
+        # than the editor the console already has.
+        checkpoints=stored.checkpoints if stored else (),
         # Carried so the snapshot in the run directory says which version of
         # the case was run. Empty for an ad-hoc invocation, which is the truth:
         # that case was never saved.
@@ -233,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
             verify_timeout_s=case.verify_timeout_s,
             warmup=case.warmup,
         ),
+        checkpoints=case.checkpoints,
         on_turn=_print_turn,
         on_check=_print_check,
     )
@@ -252,6 +300,9 @@ def main(argv: list[str] | None = None) -> int:
     oracle = _oracle_summary(result)
     if oracle is not None:
         summary["oracle"] = oracle
+    ladder = _checkpoint_summary(result)
+    if ladder is not None:
+        summary["checkpoints"] = ladder
     print(json.dumps(summary, indent=2))
     print(f"wrote {out_dir}")
 

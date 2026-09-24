@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from android_runner.cases import Case, CaseStore, slugify
+from android_runner.cases import Case, Checkpoint, CaseStore, slugify
 
 
 def a_case(**overrides: object) -> Case:
@@ -173,3 +173,101 @@ def test_listing_puts_the_most_recently_edited_first(tmp_path: Path) -> None:
     # `updated_at` is stamped at save time, so the second save sorts first.
     ids = [c.id for c in store.list().cases]
     assert ids[0] == "second"
+
+
+# --- checkpoints ----------------------------------------------------------
+
+
+def a_rung(**overrides: object) -> Checkpoint:
+    fields: dict[str, object] = {
+        "id": "logged-out",
+        "condition": "the login screen is visible",
+        "after": "log ?out",
+    }
+    fields.update(overrides)
+    return Checkpoint(**fields)  # type: ignore[arg-type]
+
+
+def test_checkpoints_round_trip_through_disk(tmp_path: Path) -> None:
+    store = CaseStore(tmp_path)
+    store.save(a_case(checkpoints=(a_rung(), a_rung(id="tutorial", required=False))))
+    loaded = store.get("audio-metadata")
+
+    assert loaded is not None
+    assert [c.id for c in loaded.checkpoints] == ["logged-out", "tutorial"]
+    assert loaded.checkpoints[0].after == "log ?out"
+    assert loaded.checkpoints[0].max_polls == 3
+    assert loaded.checkpoints[1].required is False
+    on_disk = json.loads((tmp_path / "audio-metadata.json").read_text())
+    assert on_disk["checkpoints"][0]["condition"] == "the login screen is visible"
+
+
+def test_a_case_file_written_before_checkpoints_existed_still_loads() -> None:
+    """Every case in `cases/` today. The absence of a rung list is not a case
+    with an empty one by accident; it is a case that is graded exactly as it
+    was, and the runner does not change behaviour for it."""
+    case = Case.from_dict({"name": "x", "instruction": "y", "success": "z"})
+    case.validate()
+    assert case.checkpoints == ()
+    assert case.as_dict()["checkpoints"] == []
+
+
+def test_two_checkpoints_may_not_share_an_id() -> None:
+    """The id is how a rung is named in run.json, in the ladder and in the
+    terminal. Two of them is a ladder nobody can read."""
+    with pytest.raises(ValueError, match="share the id 'logged-out'"):
+        a_case(checkpoints=(a_rung(), a_rung(condition="something else"))).validate()
+
+
+def test_a_blank_checkpoint_condition_is_a_typo(tmp_path: Path) -> None:
+    """The same reasoning as a blank `success`: nothing to put to the oracle."""
+    with pytest.raises(ValueError, match="must describe a visible condition"):
+        a_rung(condition="   ").validate()
+
+
+def test_a_bad_trigger_is_named_here_rather_than_on_the_device() -> None:
+    """Twenty minutes into an emulator session is the wrong place to find out
+    that a bracket was never closed."""
+    with pytest.raises(ValueError, match=r"'log\(out' is not a valid regular"):
+        a_rung(after="log(out").validate()
+
+
+def test_an_empty_trigger_is_not_the_same_as_no_trigger() -> None:
+    """An empty pattern matches every turn, which would put the rung to the
+    oracle on the first screen of the run and call the case answered."""
+    a_rung(after=None).validate()
+    with pytest.raises(ValueError, match="leave `after` out entirely"):
+        a_rung(after="  ").validate()
+
+
+def test_a_rung_needs_a_success_condition_to_qualify() -> None:
+    with pytest.raises(ValueError, match="checkpoints need a success condition"):
+        a_case(success=None, checkpoints=(a_rung(),)).validate()
+
+
+def test_a_checkpoint_from_a_form_is_coerced_and_checked() -> None:
+    case = Case.from_dict(
+        {
+            "name": "x",
+            "instruction": "y",
+            "success": "z",
+            "checkpoints": [
+                {"name": "Logged out", "condition": "the login screen", "max_polls": "2"}
+            ],
+        }
+    )
+    case.validate()
+    rung = case.checkpoints[0]
+    assert (rung.id, rung.after, rung.max_polls, rung.required) == (
+        "logged-out",
+        None,
+        2,
+        True,
+    )
+
+
+def test_a_checkpoint_list_that_is_not_a_list_says_so() -> None:
+    with pytest.raises(ValueError, match="checkpoints must be a list"):
+        Case.from_dict(
+            {"name": "x", "instruction": "y", "checkpoints": {"id": "logged-out"}}
+        )
